@@ -1,3 +1,4 @@
+import sys
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import nodes
@@ -17,6 +18,9 @@ class SamplingParameters(io.ComfyNode):
                 io.Int.Input(id="batch_size", default=1, min=1, max=4096),
                 io.Float.Input(id="scale_by", default=1.0, min=0.0, max=10.0, step=0.01, tooltip="How much to upscale initial resolution by for the upscaled one."),
                 io.Int.Input(id="multiple", default=16, min=4, max=128, step=4, tooltip="Nearest multiple of the result to set the upscaled resolution to."),
+                io.Int.Input(id="steps", default=26, min=1, max=10000, step=1, tooltip="How many steps to run the sampling for."),
+                io.Float.Input(id="cfg", default=3.5, min=-100.0, max=100.0, step=0.01, tooltip="The amount of influence your prompot will have on the final image."),
+                io.Int.Input(id="seed", min=-sys.maxsize, max=sys.maxsize, control_after_generate=True),
             ],
             outputs=[
                 io.Int.Output(display_name="width"),
@@ -24,14 +28,17 @@ class SamplingParameters(io.ComfyNode):
                 io.Int.Output(display_name="batch_size"),
                 io.Int.Output(display_name="upscaled_width"),
                 io.Int.Output(display_name="upscaled_height"),
+                io.Int.Output(display_name="steps"),
+                io.Float.Output(display_name="cfg"),
+                io.Int.Output(display_name="seed"),
             ],
         )
 
     @classmethod
-    def execute(cls, *, width: int, height: int, batch_size: int=1, scale_by: float, multiple: int) -> io.NodeOutput:
+    def execute(cls, *, width: int, height: int, batch_size: int=1, scale_by: float, multiple: int, steps: int, cfg: float, seed: int) -> io.NodeOutput:
         upscaled_width = round_to_nearest(int(width*scale_by), int(multiple))
         upscaled_height = round_to_nearest(int(height*scale_by), int(multiple))
-        return io.NodeOutput(width, height, batch_size, upscaled_width, upscaled_height)
+        return io.NodeOutput(width, height, batch_size, upscaled_width, upscaled_height, steps, cfg, seed)
 
 class SamplingUtils(ComfyExtension):
     @override
