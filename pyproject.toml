@@ -1,0 +1,14 @@
+[project]
+name = "ComfyUI-SamplingUtils"
+description = "Utilities making it easy to set up inference parameters."
+version = "0.0.1"
+license = { file = "LICENSE" }
+
+[project.urls]
+Repository = "https://github.com/silveroxides/ComfyUI_SamplingUtils"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = "silveroxides"
+DisplayName = "Sampling Utility Toolkit"
+Icon = "https://github.com/silveroxides/ComfyUI_SamplingUtils/raw/refs/heads/main/assets/tools-icon.png"
