@@ -1,4 +1,5 @@
 import sys
+import json
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import nodes
@@ -51,11 +52,102 @@ class SamplingParameters(io.ComfyNode):
             tile_padding = round_to_nearest(int(max(width, height) - max(tile_width, tile_height)), int(multiple))
         return io.NodeOutput(width, height, batch_size, upscaled_width, upscaled_height, steps, cfg, seed, tile_width, tile_height, tile_padding)
 
+class GetJsonKeyValue(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="GetJsonKeyValue",
+            category="utils",
+            inputs=[
+                io.String.Input("json_path", default="./input/apikeys.json", multiline=False, tooltip="Path to a .json file with simple top level structure with name as key and api-key as value. See example in custom node folder."),
+                io.Combo.Input("key_id_method", options=["custom", "random_rotate", "increment_rotate"]),
+                io.Int.Input("rotation_interval", default=0, tooltip="how many steps to jump when doing rotate."),
+                io.String.Input("key_id", default="placeholder", multiline=False, tooltip="Put name of key in the .json here if using custom in key_id_method."),
+            ],
+            outputs=[
+                io.String.Output(display_name="key_value")
+            ],
+        )
+
+    @classmethod
+    def execute(cls, json_path, key_id_method, rotation_interval, key_id="placeholder") -> io.NodeOutput:
+        """
+        Loads API keys from a JSON file (top-level dictionary)
+        and selects one based on the specified method.
+
+        Args:
+            json_path (str): Path to the JSON file. Expected format:
+                             {"key_id_1": "api_key_value_1", "key_id_2": "api_key_value_2", ...}
+            key_id_method (str): Method to select the key ('custom', 'random_rotate', 'increment_rotate').
+            rotation_interval (int): Used as index for 'increment_rotate'.
+            key_id (str, optional): ID (key name) of the key to select if key_id_method is 'custom'. Defaults to "placeholder".
+
+        Returns:
+            str: The selected API key string.
+            Raises: ValueError or RuntimeError if unable to find or select a key.
+        """
+        api_keys_data = None
+        absolute_json_path = os.path.abspath(json_path)
+
+        try:
+            with open(absolute_json_path, 'r') as f:
+                api_keys_data = json.load(f)
+        except FileNotFoundError:
+            raise ValueError(f"RotateKeyAPI Error: JSON file not found at {absolute_json_path}")
+        except json.JSONDecodeError:
+            raise ValueError(f"RotateKeyAPI Error: Could not decode JSON from {absolute_json_path}. Check file format.")
+        except Exception as e:
+            raise RuntimeError(f"RotateKeyAPI Error: Unexpected error reading file {absolute_json_path}: {e}")
+
+        if not isinstance(api_keys_data, dict):
+            raise ValueError(f"RotateKeyAPI Error: JSON content is not a dictionary in {absolute_json_path}. Expected format: {{'key_id': 'api_key', ...}}")
+
+        if not api_keys_data:
+             raise ValueError(f"RotateKeyAPI Error: The JSON dictionary in {absolute_json_path} is empty.")
+
+        selected_key_value = None
+
+        if key_id_method == "custom":
+            if key_id == "placeholder":
+                 print("RotateKeyAPI Warning: 'custom' method selected but 'key_id' is still the default 'placeholder'. Ensure this is intended or provide a valid key ID.")
+
+            selected_key_value = api_keys_data.get(key_id)
+
+            if selected_key_value is None:
+                 raise ValueError(f"RotateKeyAPI Error: Custom key ID '{key_id}' not found in the JSON dictionary keys.")
+
+
+        elif key_id_method == "random_rotate":
+            api_keys_list = list(api_keys_data.values())
+
+            selected_key_value = random.choice(api_keys_list)
+
+        elif key_id_method == "increment_rotate":
+             api_keys_list = list(api_keys_data.values())
+
+             index = rotation_interval % len(api_keys_list)
+
+             try:
+                selected_key_value = api_keys_list[index]
+             except IndexError:
+                 raise IndexError(f"RotateKeyAPI Error: Calculated index {index} (from interval {rotation_interval}) is out of bounds for list of size {len(api_keys_list)}.")
+             except Exception as e:
+                  raise RuntimeError(f"RotateKeyAPI Error: Unexpected error accessing item at index {index}: {e}")
+
+        if not isinstance(selected_key_value, str) or not selected_key_value:
+             raise ValueError(f"RotateKeyAPI Error: Retrieved value for selected key is not a valid string. Value: {selected_key_value}")
+
+
+        print(f"RotateKeyAPI: Successfully retrieved API key using method '{key_id_method}'.")
+        return io.NodeOutput(selected_key_value)
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SamplingParameters,
+            GetJsonKeyValue,
         ]
 
 
