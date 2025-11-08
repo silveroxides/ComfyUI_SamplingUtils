@@ -59,7 +59,7 @@ class GetJsonKeyValue(io.ComfyNode):
             node_id="GetJsonKeyValue",
             category="utils",
             inputs=[
-                io.String.Input("json_path", default="./input/apikeys.json", multiline=False, tooltip="Path to a .json file with simple top level structure with name as key and api-key as value. See example in custom node folder."),
+                io.String.Input("json_path", default="./input/JSON_KeyValueStore.json", multiline=False, tooltip="Path to a .json file with simple top level structure with key and value. See example in custom node folder."),
                 io.Combo.Input("key_id_method", options=["custom", "random_rotate", "increment_rotate"]),
                 io.Int.Input("rotation_interval", default=0, tooltip="how many steps to jump when doing rotate."),
                 io.String.Input("key_id", default="placeholder", multiline=False, tooltip="Put name of key in the .json here if using custom in key_id_method."),
