@@ -50,6 +50,8 @@ class SamplingParameters(io.ComfyNode):
             tile_width = round_to_nearest(int(upscaled_width * 0.5), int(multiple))
             tile_height = round_to_nearest(int(upscaled_height * 0.5), int(multiple))
             tile_padding = round_to_nearest(int(max(width, height) - max(tile_width, tile_height)), int(multiple))
+        width = round_to_nearest(int(width), int(multiple))
+        height = round_to_nearest(int(height), int(multiple))
         return io.NodeOutput(width, height, batch_size, upscaled_width, upscaled_height, steps, cfg, seed, tile_width, tile_height, tile_padding)
 
 class GetJsonKeyValue(io.ComfyNode):
