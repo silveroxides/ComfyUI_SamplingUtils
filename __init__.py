@@ -1,11 +1,42 @@
 import sys
 import json
+from PIL import Image
+import torch
+import numpy as np
+import hashlib
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import nodes
 
 def round_to_nearest(n, m):
     return int((n + (m / 2)) // m) * m
+
+# Tensor to PIL
+def tensor2pil(image):
+    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+
+# PIL to Tensor
+def pil2tensor(image):
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+# PIL Hex
+def pil2hex(image):
+    return hashlib.sha256(np.array(tensor2pil(image)).astype(np.uint16).tobytes()).hexdigest()
+
+# PIL to Mask
+def pil2mask(image):
+    image_np = np.array(image.convert("L")).astype(np.float32) / 255.0
+    mask = torch.from_numpy(image_np)
+    return 1.0 - mask
+
+# Mask to PIL
+def mask2pil(mask):
+    if mask.ndim > 2:
+        mask = mask.squeeze(0)
+    mask_np = mask.cpu().numpy().astype('uint8')
+    mask_pil = Image.fromarray(mask_np, mode="L")
+    return mask_pil
+
 
 class SamplingParameters(io.ComfyNode):
     @classmethod
@@ -143,11 +174,11 @@ class GetJsonKeyValue(io.ComfyNode):
         print(f"RotateKeyAPI: Successfully retrieved API key using method '{key_id_method}'.")
         return io.NodeOutput(selected_key_value)
 
-class Image_Power_Noise(io.ComfyNode):
+class Image_Color_Noise(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="Image_Power_Noise",
+            node_id="Image_Color_Noise",
             category="utils",
             inputs=[
                 io.Int.Input("width", default=512, max=4096, min=64, step=1),
@@ -244,7 +275,7 @@ class SamplingUtils(ComfyExtension):
         return [
             SamplingParameters,
             GetJsonKeyValue,
-            Image_Power_Noise,
+            Image_Color_Noise,
         ]
 
 
