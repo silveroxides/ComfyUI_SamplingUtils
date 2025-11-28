@@ -143,6 +143,100 @@ class GetJsonKeyValue(io.ComfyNode):
         print(f"RotateKeyAPI: Successfully retrieved API key using method '{key_id_method}'.")
         return io.NodeOutput(selected_key_value)
 
+class Image_Power_Noise(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="Image_Power_Noise",
+            category="utils",
+            inputs=[
+                io.Int.Input("width", default=512, max=4096, min=64, step=1),
+                io.Int.Input("height", default=512, max=4096, min=64, step=1),
+                io.Float.Input("frequency", default=0.5, max=100.0, min=0.0, step=0.01),
+                io.Float.Input("attenuation", default=0.5, max=100.0, min=0.0, step=0.01),
+                io.Combo.Input("noise_type", options=["grey", "white", "red", "pink", "green", "blue", "mix"]),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
+            ],
+            outputs=[
+                io.Image.Output(display_name="noise_image"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, width, height, frequency, attenuation, noise_type, seed):
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        noise_image = cls.generate_power_noise(width, height, frequency, attenuation, noise_type, generator)
+        return io.NodeOutput(pil2tensor(noise_image))
+
+    @classmethod
+    def generate_power_noise(cls, width, height, frequency, attenuation, noise_type, generator):
+
+        def normalize_array(arr):
+            return (255 * (arr - np.min(arr)) / (np.max(arr) - np.min(arr))).astype(np.uint8)
+
+        def white_noise(w, h, gen):
+            return torch.rand(h, w, generator=gen).numpy()
+
+        def grey_noise_texture(w, h, att, gen):
+            return torch.normal(mean=0, std=att, size=(h, w), generator=gen).numpy()
+
+        def fourier_noise(w, h, att, power_modifier, gen):
+            noise = grey_noise_texture(w, h, att, gen)
+            fy = np.fft.fftfreq(h)[:, np.newaxis]
+            fx = np.fft.fftfreq(w)
+            f = np.sqrt(fx**2 + fy**2)
+            f[0, 0] = 1.0
+            power_spectrum = f ** power_modifier
+            fft_noise = np.fft.fft2(noise)
+            fft_modified = fft_noise * power_spectrum
+            inv_fft = np.fft.ifft2(fft_modified)
+            return np.real(inv_fft)
+
+        noise_array = np.zeros((height, width, 3), dtype=np.uint8)
+        zeros_channel = np.zeros((height, width), dtype=np.uint8)
+
+        if noise_type == "grey":
+            luma = normalize_array(grey_noise_texture(width, height, attenuation, generator))
+            noise_array = np.stack([luma, luma, luma], axis=-1)
+        
+        elif noise_type == "white":
+            r = normalize_array(white_noise(width, height, generator))
+            g = normalize_array(white_noise(width, height, generator))
+            b = normalize_array(white_noise(width, height, generator))
+            noise_array = np.stack([r, g, b], axis=-1)
+
+        elif noise_type == "red":
+            r = normalize_array(white_noise(width, height, generator))
+            noise_array = np.stack([r, zeros_channel, zeros_channel], axis=-1)
+
+        elif noise_type == "green":
+            g = normalize_array(white_noise(width, height, generator))
+            noise_array = np.stack([zeros_channel, g, zeros_channel], axis=-1)
+
+        elif noise_type == "blue":
+            b = normalize_array(white_noise(width, height, generator))
+            noise_array = np.stack([zeros_channel, zeros_channel, b], axis=-1)
+            
+        elif noise_type == "pink":
+            base_texture = fourier_noise(width, height, attenuation, -1.0, generator)
+            r = normalize_array(base_texture)
+            g = (r * 0.75).astype(np.uint8)
+            b = (r * 0.85).astype(np.uint8)
+            noise_array = np.stack([r, g, b], axis=-1)
+
+        elif noise_type == "mix":
+            r = normalize_array(fourier_noise(width, height, attenuation, -1.0, generator)) # Pink Frequency
+            g = normalize_array(fourier_noise(width, height, attenuation, 0.5, generator))  # Green Frequency
+            b = normalize_array(fourier_noise(width, height, attenuation, 1.0, generator))   # Blue Frequency
+            noise_array = np.stack([r, g, b], axis=-1)
+
+        else:
+            cstr(f"Unsupported noise type `{noise_type}`").error.print()
+            return Image.new("RGB", (width, height), color="black")
+
+        return Image.fromarray(noise_array, 'RGB')
+
 
 class SamplingUtils(ComfyExtension):
     @override
@@ -150,6 +244,7 @@ class SamplingUtils(ComfyExtension):
         return [
             SamplingParameters,
             GetJsonKeyValue,
+            Image_Power_Noise,
         ]
 
 
