@@ -268,6 +268,63 @@ class Image_Color_Noise(io.ComfyNode):
 
         return Image.fromarray(noise_array, 'RGB')
 
+class TextEncodeFlux2SystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeFlux2SystemPrompt",
+            category="advanced/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
+        if len(system_prompt) > 0:
+            template_prefix = r"[SYSTEM_PROMPT]"
+            template_suffix = r"[/SYSTEM_PROMPT][INST]{}[/INST]"
+            llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
+            tokens = clip.tokenize(prompt, llama_template=llama_template)
+        else:
+            tokens = clip.tokenize(prompt)
+
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        return io.NodeOutput(conditioning)
+
+class TextEncodeZITSystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeZITSystemPrompt",
+            category="advanced/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
+        if len(system_prompt) > 0:
+            template_prefix = "<|im_start|>system\n"
+            template_suffix = "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+            llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
+            tokens = clip.tokenize(prompt, llama_template=llama_template)
+        else:
+            tokens = clip.tokenize(prompt)
+
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        return io.NodeOutput(conditioning)
 
 class SamplingUtils(ComfyExtension):
     @override
@@ -276,6 +333,8 @@ class SamplingUtils(ComfyExtension):
             SamplingParameters,
             GetJsonKeyValue,
             Image_Color_Noise,
+            TextEncodeFlux2SystemPrompt,
+            TextEncodeZITSystemPrompt,
         ]
 
 
