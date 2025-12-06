@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI_SamplingUtils"
 description = "Utilities making it easy to set up inference parameters."
-version = "0.0.8"
+version = "0.0.9"
 license = { file = "LICENSE" }
 
 [project.urls]
