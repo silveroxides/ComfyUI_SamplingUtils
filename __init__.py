@@ -1,23 +1,22 @@
 import sys
 import json
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from typing import Union, List
 import torch
 import numpy as np
+import scipy
 import hashlib
+from tqdm import tqdm
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
+from comfy import model_management
 import nodes
+from nodes import MAX_RESOLUTION
+
+
 
 def round_to_nearest(n, m):
     return int((n + (m / 2)) // m) * m
-
-# Tensor to PIL
-def tensor2pil(image):
-    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
-
-# PIL to Tensor
-def pil2tensor(image):
-    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
 # PIL Hex
 def pil2hex(image):
@@ -36,6 +35,41 @@ def mask2pil(mask):
     mask_np = mask.cpu().numpy().astype('uint8')
     mask_pil = Image.fromarray(mask_np, mode="L")
     return mask_pil
+
+# Utility functions from mtb nodes: https://github.com/melMass/comfy_mtb
+def pil2tensor(image: Union[Image.Image, List[Image.Image]]) -> torch.Tensor:
+    if isinstance(image, list):
+        return torch.cat([pil2tensor(img) for img in image], dim=0)
+
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+
+def np2tensor(img_np: Union[np.ndarray, List[np.ndarray]]) -> torch.Tensor:
+    if isinstance(img_np, list):
+        return torch.cat([np2tensor(img) for img in img_np], dim=0)
+
+    return torch.from_numpy(img_np.astype(np.float32) / 255.0).unsqueeze(0)
+
+
+def tensor2np(tensor: torch.Tensor):
+    if len(tensor.shape) == 3:  # Single image
+        return np.clip(255.0 * tensor.cpu().numpy(), 0, 255).astype(np.uint8)
+    else:  # Batch of images
+        return [np.clip(255.0 * t.cpu().numpy(), 0, 255).astype(np.uint8) for t in tensor]
+
+def tensor2pil(image: torch.Tensor) -> List[Image.Image]:
+    batch_count = image.size(0) if len(image.shape) > 3 else 1
+    if batch_count > 1:
+        out = []
+        for i in range(batch_count):
+            out.extend(tensor2pil(image[i]))
+        return out
+
+    return [
+        Image.fromarray(
+            np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+        )
+    ]
 
 
 class SamplingParameters(io.ComfyNode):
@@ -230,7 +264,7 @@ class Image_Color_Noise(io.ComfyNode):
         if noise_type == "grey":
             luma = normalize_array(grey_noise_texture(width, height, attenuation, generator))
             noise_array = np.stack([luma, luma, luma], axis=-1)
-        
+
         elif noise_type == "white":
             r = normalize_array(white_noise(width, height, generator))
             g = normalize_array(white_noise(width, height, generator))
@@ -248,7 +282,7 @@ class Image_Color_Noise(io.ComfyNode):
         elif noise_type == "blue":
             b = normalize_array(white_noise(width, height, generator))
             noise_array = np.stack([zeros_channel, zeros_channel, b], axis=-1)
-            
+
         elif noise_type == "pink":
             base_texture = fourier_noise(width, height, attenuation, -1.0, generator)
             r = normalize_array(base_texture)
@@ -326,6 +360,135 @@ class TextEncodeZITSystemPrompt(io.ComfyNode):
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning)
 
+class ModifyMask(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ModifyMask",
+            category="utils/mask",
+            inputs=[
+                io.Mask.Input("mask"),
+                io.Int.Input("expand", default=0, max=MAX_RESOLUTION, min=-MAX_RESOLUTION, step=1),
+                io.Float.Input("incremental_expandrate", default=0.0, max=100.0, min=0.0, step=0.01),
+                io.Boolean.Input("tapered_corners", default=True),
+                io.Boolean.Input("flip_input", default=False),
+                io.Float.Input("blur_radius", default=0.0, max=100.0, min=0.0, step=0.01),
+                io.Float.Input("lerp_alpha", default=1.0, max=1.0, min=0.0, step=0.01),
+                io.Float.Input("decay_factor", default=1.0, max=1.0, min=0.0, step=0.01),
+                io.Boolean.Input("fill_holes", default=False, optional=True),
+            ],
+            outputs=[
+                io.Mask.Output(display_name="mask"),
+                io.Mask.Output(display_name="mask_inverted"),
+            ],
+        )
+
+    @classmethod
+    def execute(self, mask, expand, tapered_corners, flip_input, blur_radius, incremental_expandrate, lerp_alpha, decay_factor, fill_holes=False):
+        import kornia.morphology as morph
+        alpha = lerp_alpha
+        decay = decay_factor
+
+        # 1. Clone the original mask to keep a reference to the un-blurred pixels
+        original_mask_input = mask.clone()
+
+        if flip_input:
+            mask = 1.0 - mask
+            original_mask_input = 1.0 - original_mask_input
+
+        growmask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
+
+        # Prepare original mask for processing loop (match dimensions)
+        original_mask_batches = original_mask_input.reshape((-1, mask.shape[-2], mask.shape[-1]))
+
+        out = []
+        previous_output = None
+        current_expand = expand
+        for m in tqdm(growmask, desc="Expanding/Contracting Mask"):
+            output = m.unsqueeze(0).unsqueeze(0).to(model_management.get_torch_device())  # Add batch and channel dims for kornia
+            if abs(round(current_expand)) > 0:
+                # Create kernel - kornia expects kernel on same device as input
+                if tapered_corners:
+                    kernel = torch.tensor([[0, 1, 0],
+                                        [1, 1, 1],
+                                        [0, 1, 0]], dtype=torch.float32, device=output.device)
+                else:
+                    kernel = torch.tensor([[1, 1, 1],
+                                        [1, 1, 1],
+                                        [1, 1, 1]], dtype=torch.float32, device=output.device)
+
+                for _ in range(abs(round(current_expand))):
+                    if current_expand < 0:
+                        output = morph.erosion(output, kernel)
+                    else:
+                        output = morph.dilation(output, kernel)
+
+            output = output.squeeze(0).squeeze(0)  # Remove batch and channel dims
+
+            if current_expand < 0:
+                current_expand -= abs(incremental_expandrate)
+            else:
+                current_expand += abs(incremental_expandrate)
+
+            if fill_holes:
+                binary_mask = output > 0
+                output_np = binary_mask.cpu().numpy()
+                filled = scipy.ndimage.binary_fill_holes(output_np)
+                output = torch.from_numpy(filled.astype(np.float32)).to(output.device)
+
+            if alpha < 1.0 and previous_output is not None:
+                output = alpha * output + (1 - alpha) * previous_output
+            if decay < 1.0 and previous_output is not None:
+                output += decay * previous_output
+                output = output / output.max()
+            previous_output = output
+            out.append(output.cpu())
+
+        if blur_radius != 0 and current_expand != 0:
+            # Convert the tensor list to PIL images, apply blur, and convert back
+            for idx, tensor in enumerate(out):
+                # Convert tensor to PIL image
+                pil_image = tensor2pil(tensor.cpu().detach())[0]
+                # Apply Gaussian blur
+                pil_image = pil_image.filter(ImageFilter.GaussianBlur(blur_radius))
+                # Convert back to tensor
+                blurred_tensor = pil2tensor(pil_image)
+
+                # 2. Restore the original pixels IF we are expanding
+                # We use torch.max: this keeps the original pixel value unless the
+                # blurred expansion is brighter. It prevents "adding" values together.
+                if current_expand > 0:
+                    original_slice = original_mask_batches[idx].unsqueeze(0).cpu()
+                    blurred_tensor = torch.max(blurred_tensor, original_slice)
+                else:
+                    original_slice = original_mask_batches[idx].unsqueeze(0).cpu()
+                    blurred_tensor = torch.min(blurred_tensor, original_slice)
+
+                out[idx] = blurred_tensor
+
+            blurred = torch.cat(out, dim=0)
+            mask = blurred
+            mask_inverted = 1.0 - blurred
+            return io.NodeOutput(mask, mask_inverted)
+        elif blur_radius != 0 and current_expand == 0:
+            # Convert the tensor list to PIL images, apply blur, and convert back
+            for idx, tensor in enumerate(out):
+                # Convert tensor to PIL image
+                pil_image = tensor2pil(tensor.cpu().detach())[0]
+                # Apply Gaussian blur
+                pil_image = pil_image.filter(ImageFilter.GaussianBlur(blur_radius))
+                # Convert back to tensor
+                out[idx] = pil2tensor(pil_image)
+            blurred = torch.cat(out, dim=0)
+            mask = blurred
+            mask_inverted = 1.0 - blurred
+            return io.NodeOutput(mask, mask_inverted)
+        else:
+            mask = torch.stack(out, dim=0)
+            mask_inverted = 1.0 - torch.stack(out, dim=0)
+            return io.NodeOutput(mask, mask_inverted)
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -335,6 +498,7 @@ class SamplingUtils(ComfyExtension):
             Image_Color_Noise,
             TextEncodeFlux2SystemPrompt,
             TextEncodeZITSystemPrompt,
+            ModifyMask,
         ]
 
 
