@@ -21,58 +21,6 @@ from .system_messages import SYSTEM_MESSAGE, SYSTEM_MESSAGE_UPSAMPLING_I2I, SYST
 def round_to_nearest(n, m):
     return int((n + (m / 2)) // m) * m
 
-# PIL Hex
-def pil2hex(image):
-    return hashlib.sha256(np.array(tensor2pil(image)).astype(np.uint16).tobytes()).hexdigest()
-
-# PIL to Mask
-def pil2mask(image):
-    image_np = np.array(image.convert("L")).astype(np.float32) / 255.0
-    mask = torch.from_numpy(image_np)
-    return 1.0 - mask
-
-# Mask to PIL
-def mask2pil(mask):
-    if mask.ndim > 2:
-        mask = mask.squeeze(0)
-    mask_np = mask.cpu().numpy().astype('uint8')
-    mask_pil = Image.fromarray(mask_np, mode="L")
-    return mask_pil
-
-# Utility functions from mtb nodes: https://github.com/melMass/comfy_mtb
-def pil2tensor(image: Union[Image.Image, List[Image.Image]]) -> torch.Tensor:
-    if isinstance(image, list):
-        return torch.cat([pil2tensor(img) for img in image], dim=0)
-
-    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
-
-
-def np2tensor(img_np: Union[np.ndarray, List[np.ndarray]]) -> torch.Tensor:
-    if isinstance(img_np, list):
-        return torch.cat([np2tensor(img) for img in img_np], dim=0)
-
-    return torch.from_numpy(img_np.astype(np.float32) / 255.0).unsqueeze(0)
-
-
-def tensor2np(tensor: torch.Tensor):
-    if len(tensor.shape) == 3:  # Single image
-        return np.clip(255.0 * tensor.cpu().numpy(), 0, 255).astype(np.uint8)
-    else:  # Batch of images
-        return [np.clip(255.0 * t.cpu().numpy(), 0, 255).astype(np.uint8) for t in tensor]
-
-def tensor2pil(image: torch.Tensor) -> List[Image.Image]:
-    batch_count = image.size(0) if len(image.shape) > 3 else 1
-    if batch_count > 1:
-        out = []
-        for i in range(batch_count):
-            out.extend(tensor2pil(image[i]))
-        return out
-
-    return [
-        Image.fromarray(
-            np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
-        )
-    ]
 
 
 class SamplingParameters(io.ComfyNode):
@@ -417,6 +365,26 @@ class ModifyMask(io.ComfyNode):
     @classmethod
     def execute(self, mask, expand, tapered_corners, flip_input, blur_radius, incremental_expandrate, lerp_alpha, decay_factor, fill_holes=False):
         import kornia.morphology as morph
+
+        def pil2tensor(image: Union[Image.Image, List[Image.Image]]) -> torch.Tensor:
+            if isinstance(image, list):
+                return torch.cat([pil2tensor(img) for img in image], dim=0)
+            return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+
+        def tensor2pil(image: torch.Tensor) -> List[Image.Image]:
+            batch_count = image.size(0) if len(image.shape) > 3 else 1
+            if batch_count > 1:
+                out = []
+                for i in range(batch_count):
+                    out.extend(tensor2pil(image[i]))
+                return out
+            return [
+                Image.fromarray(
+                    np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+                )
+            ]
+
         alpha = lerp_alpha
         decay = decay_factor
 
@@ -556,7 +524,18 @@ class ImageBlendByMask(io.ComfyNode):
 
     @classmethod
     def execute(self, destination, source, mode='add', blend_percentage=1.0, resize_source=False, mask=None):
+
+        # Tensor to PIL
+        def tensor2pil(image):
+            return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+        # PIL to Tensor
+        def pil2tensor(image):
+            return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
         destination, source = node_helpers.image_alpha_fix(destination, source)
+        destination = destination.clone().movedim(-1, 1)
+        source = source.movedim(-1, 1).to(destination.device)
+
         if resize_source:
             source = torch.nn.functional.interpolate(source, size=(destination.shape[-2], destination.shape[-1]), mode="bicubic")
 
@@ -564,6 +543,7 @@ class ImageBlendByMask(io.ComfyNode):
         img_a = tensor2pil(destination)
         img_b = tensor2pil(source)
 
+        for i in tqdm(, desc="Expanding/Contracting Mask"):
         # Apply blending mode
         blending_modes = {
             "color": pilgram.css.blending.color,
