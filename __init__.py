@@ -543,7 +543,6 @@ class ImageBlendByMask(io.ComfyNode):
         img_a = tensor2pil(destination)
         img_b = tensor2pil(source)
 
-        for i in tqdm(, desc="Expanding/Contracting Mask"):
         # Apply blending mode
         blending_modes = {
             "color": pilgram.css.blending.color,
