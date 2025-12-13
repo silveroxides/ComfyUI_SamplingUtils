@@ -564,10 +564,6 @@ class ImageBlendByMask(io.ComfyNode):
         img_a = tensor2pil(destination)
         img_b = tensor2pil(source)
 
-        # Ensure images are the same size
-        if img_a.size != img_b.size:
-            raise ValueError("Input images must have the same dimensions")
-
         # Apply blending mode
         blending_modes = {
             "color": pilgram.css.blending.color,
