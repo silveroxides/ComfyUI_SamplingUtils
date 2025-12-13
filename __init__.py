@@ -21,6 +21,30 @@ from .system_messages import SYSTEM_MESSAGE, SYSTEM_MESSAGE_UPSAMPLING_I2I, SYST
 def round_to_nearest(n, m):
     return int((n + (m / 2)) // m) * m
 
+# Tensor to PIL
+def simpletensor2pil(image):
+    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+# PIL to Tensor
+def simplepil2tensor(image):
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+def pil2tensor(image: Union[Image.Image, List[Image.Image]]) -> torch.Tensor:
+    if isinstance(image, list):
+        return torch.cat([pil2tensor(img) for img in image], dim=0)
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+def tensor2pil(image: torch.Tensor) -> List[Image.Image]:
+    batch_count = image.size(0) if len(image.shape) > 3 else 1
+    if batch_count > 1:
+        out = []
+        for i in range(batch_count):
+            out.extend(tensor2pil(image[i]))
+        return out
+    return [
+        Image.fromarray(
+            np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+        )
+    ]
 
 
 class SamplingParameters(io.ComfyNode):
@@ -366,24 +390,6 @@ class ModifyMask(io.ComfyNode):
     def execute(self, mask, expand, tapered_corners, flip_input, blur_radius, incremental_expandrate, lerp_alpha, decay_factor, fill_holes=False):
         import kornia.morphology as morph
 
-        def pil2tensor(image: Union[Image.Image, List[Image.Image]]) -> torch.Tensor:
-            if isinstance(image, list):
-                return torch.cat([pil2tensor(img) for img in image], dim=0)
-            return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
-
-
-        def tensor2pil(image: torch.Tensor) -> List[Image.Image]:
-            batch_count = image.size(0) if len(image.shape) > 3 else 1
-            if batch_count > 1:
-                out = []
-                for i in range(batch_count):
-                    out.extend(tensor2pil(image[i]))
-                return out
-            return [
-                Image.fromarray(
-                    np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
-                )
-            ]
 
         alpha = lerp_alpha
         decay = decay_factor
@@ -525,13 +531,6 @@ class ImageBlendByMask(io.ComfyNode):
     @classmethod
     def execute(self, destination, source, mode='add', blend_percentage=1.0, resize_source=False, mask=None):
 
-        # Tensor to PIL
-        def tensor2pil(image):
-            return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
-        # PIL to Tensor
-        def pil2tensor(image):
-            return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
-
         destination, source = node_helpers.image_alpha_fix(destination, source)
         destination = destination.clone().movedim(-1, 1)
         source = source.movedim(-1, 1).to(destination.device)
@@ -540,8 +539,8 @@ class ImageBlendByMask(io.ComfyNode):
             source = torch.nn.functional.interpolate(source, size=(destination.shape[-2], destination.shape[-1]), mode="bicubic")
 
         # Convert images to PIL
-        img_a = tensor2pil(destination)
-        img_b = tensor2pil(source)
+        img_a = simpletensor2pil(destination)
+        img_b = simpletensor2pil(source)
 
         # Apply blending mode
         blending_modes = {
@@ -567,7 +566,7 @@ class ImageBlendByMask(io.ComfyNode):
 
         # Apply mask if provided
         if mask is not None:
-            mask = ImageOps.invert(tensor2pil(mask).convert('L'))
+            mask = ImageOps.invert(simpletensor2pil(mask).convert('L'))
             out_image = Image.composite(img_a, out_image, mask.resize(img_a.size))
 
         # Blend image based on blend percentage
@@ -575,7 +574,7 @@ class ImageBlendByMask(io.ComfyNode):
         blend_mask = ImageOps.invert(blend_mask)
         out_image = Image.composite(img_a, out_image, blend_mask)
 
-        blended_image = pil2tensor(out_image)
+        blended_image = simplepil2tensor(out_image)
         return io.NodeOutput(blended_image)
 
 
