@@ -1,0 +1,3 @@
+kornia
+scipy
+pilgram

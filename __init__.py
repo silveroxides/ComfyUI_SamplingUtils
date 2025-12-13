@@ -6,12 +6,14 @@ import torch
 import numpy as np
 import scipy
 import hashlib
+import pilgram
 from tqdm import tqdm
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from comfy import model_management
 import nodes
 from nodes import MAX_RESOLUTION
+from .system_messages import SYSTEM_MESSAGE, SYSTEM_MESSAGE_UPSAMPLING_I2I, SYSTEM_MESSAGE_UPSAMPLING_T2I
 
 
 
@@ -302,6 +304,34 @@ class Image_Color_Noise(io.ComfyNode):
 
         return Image.fromarray(noise_array, 'RGB')
 
+class SystemMessagePresets(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SystemMessagePresets",
+            category="advanced/conditioning",
+            inputs=[
+                io.Combo.Input("preset", options=[
+                    "F2_SYSTEM_MESSAGE",
+                    "F2_SYSTEM_MESSAGE_UPSAMPLING_I2I",
+                    "F2_SYSTEM_MESSAGE_UPSAMPLING_T2I"
+                ], default="F2_SYSTEM_MESSAGE"),
+            ],
+            outputs=[
+                io.String.Output(display_name="system_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = {
+            "F2_SYSTEM_MESSAGE": SYSTEM_MESSAGE,
+            "F2_SYSTEM_MESSAGE_UPSAMPLING_I2I": SYSTEM_MESSAGE_UPSAMPLING_I2I,
+            "F2_SYSTEM_MESSAGE_UPSAMPLING_T2I": SYSTEM_MESSAGE_UPSAMPLING_T2I,
+        }
+        system_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(system_prompt)
+
 class TextEncodeFlux2SystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -489,6 +519,90 @@ class ModifyMask(io.ComfyNode):
             return io.NodeOutput(mask, mask_inverted)
 
 
+class ImageBlendByMask(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ImageBlendByMask",
+            category="utils/mask",
+            inputs=[
+                io.Image.Input("destination"),
+                io.Image.Input("source"),
+                io.Combo.Input("mode", options=[
+                    "add",
+                    "color",
+                    "color_burn",
+                    "color_dodge",
+                    "darken",
+                    "difference",
+                    "exclusion",
+                    "hard_light",
+                    "hue",
+                    "lighten",
+                    "multiply",
+                    "overlay",
+                    "screen",
+                    "soft_light"
+                ], default="add"),
+                io.Float.Input("blend_percentage", default=1.0, max=1.0, min=0.0, step=0.01),
+                io.Boolean.Input("resize_source", default=False),
+                io.Mask.Input("mask"),
+            ],
+            outputs=[
+                io.Image.Output(display_name="blended_image"),
+            ],
+        )
+
+    @classmethod
+    def execute(self, destination, source, mode='add', blend_percentage=1.0, resize_source=False, mask=None):
+        destination, source = node_helpers.image_alpha_fix(destination, source)
+        if resize_source:
+            source = torch.nn.functional.interpolate(source, size=(destination.shape[-2], destination.shape[-1]), mode="bicubic")
+
+        # Convert images to PIL
+        img_a = tensor2pil(destination)
+        img_b = tensor2pil(source)
+
+        # Ensure images are the same size
+        if img_a.size != img_b.size:
+            raise ValueError("Input images must have the same dimensions")
+
+        # Apply blending mode
+        blending_modes = {
+            "color": pilgram.css.blending.color,
+            "color_burn": pilgram.css.blending.color_burn,
+            "color_dodge": pilgram.css.blending.color_dodge,
+            "darken": pilgram.css.blending.darken,
+            "difference": pilgram.css.blending.difference,
+            "exclusion": pilgram.css.blending.exclusion,
+            "hard_light": pilgram.css.blending.hard_light,
+            "hue": pilgram.css.blending.hue,
+            "lighten": pilgram.css.blending.lighten,
+            "multiply": pilgram.css.blending.multiply,
+            "add": pilgram.css.blending.normal,
+            "overlay": pilgram.css.blending.overlay,
+            "screen": pilgram.css.blending.screen,
+            "soft_light": pilgram.css.blending.soft_light
+        }
+
+        out_image = blending_modes.get(mode, pilgram.css.blending.normal)(img_a, img_b)
+
+        out_image = out_image.convert("RGB")
+
+        # Apply mask if provided
+        if mask is not None:
+            mask = ImageOps.invert(tensor2pil(mask).convert('L'))
+            out_image = Image.composite(img_a, out_image, mask.resize(img_a.size))
+
+        # Blend image based on blend percentage
+        blend_mask = Image.new(mode="L", size=img_a.size, color=(round(blend_percentage * 255)))
+        blend_mask = ImageOps.invert(blend_mask)
+        out_image = Image.composite(img_a, out_image, blend_mask)
+
+        blended_image = pil2tensor(out_image)
+        return io.NodeOutput(blended_image)
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -499,6 +613,8 @@ class SamplingUtils(ComfyExtension):
             TextEncodeFlux2SystemPrompt,
             TextEncodeZITSystemPrompt,
             ModifyMask,
+            ImageBlendByMask,
+            SystemMessagePresets,
         ]
 
 
