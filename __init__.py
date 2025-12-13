@@ -12,6 +12,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from comfy import model_management
 import nodes
+import node_helpers
 from nodes import MAX_RESOLUTION
 from .system_messages import SYSTEM_MESSAGE, SYSTEM_MESSAGE_UPSAMPLING_I2I, SYSTEM_MESSAGE_UPSAMPLING_T2I
 
