@@ -1,7 +1,8 @@
 import sys
 import json
+import re
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
-from typing import Union, List
+from typing import Union, List, Tuple
 import torch
 import numpy as np
 import scipy
@@ -15,7 +16,6 @@ import nodes
 import node_helpers
 from nodes import MAX_RESOLUTION
 from .system_messages import SYSTEM_MESSAGE, SYSTEM_MESSAGE_UPSAMPLING_I2I, SYSTEM_MESSAGE_UPSAMPLING_T2I
-
 
 
 def round_to_nearest(n, m):
@@ -45,6 +45,71 @@ def tensor2pil(image: torch.Tensor) -> List[Image.Image]:
             np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
         )
     ]
+
+
+def pad_text_with_joiners(text: str) -> str:
+    """
+    Pad each character in the text with word joiner unicode characters.
+
+    Parameters:
+        text (str): Input string to pad
+
+    Returns:
+        str: String with word joiners between each character and at start/end
+    """
+    if not text:
+        return ""
+
+    padding_char = "\u2060"
+
+    # Build the pattern using an f-string to correctly embed the unicode char.
+    pattern = f"([^{padding_char}])(?=[^{padding_char}])"
+    replacement = r"\1" + padding_char
+
+    joined_text = re.sub(pattern, replacement, text)
+
+    return padding_char + joined_text + padding_char
+
+
+def to_bold_fraktur(text: str) -> str:
+    """
+    Convert all ASCII letters in a string to their Unicode mathematical
+    bold fraktur counterparts.
+
+    Parameters:
+        text (str): Input string to convert
+
+    Returns:
+        str: String with letters converted to bold fraktur
+    """
+    result = []
+
+    # Bold fraktur uppercase starts at U+1D56C (𝕬)
+    # Bold fraktur lowercase starts at U+1D586 (𝖆)
+    BOLD_FRAKTUR_UPPER_START = 0x1D56C
+    BOLD_FRAKTUR_LOWER_START = 0x1D586
+
+    for char in text:
+        if 'A' <= char <= 'Z':
+            offset = ord(char) - ord('A')
+            result.append(chr(BOLD_FRAKTUR_UPPER_START + offset))
+        elif 'a' <= char <= 'z':
+            offset = ord(char) - ord('a')
+            result.append(chr(BOLD_FRAKTUR_LOWER_START + offset))
+        else:
+            result.append(char)
+
+    return ''.join(result)
+
+
+def frakturpad(text: str) -> str:
+    """
+    Convert ASCII letters to bold fraktur and pad with word joiners.
+    First converts A-Z and a-z to their bold fraktur equivalents,
+    then pads the result with word joiner characters (U+2060).
+    """
+    fraktur_text = to_bold_fraktur(text)
+    return pad_text_with_joiners(fraktur_text)
 
 
 class SamplingParameters(io.ComfyNode):
@@ -578,6 +643,40 @@ class ImageBlendByMask(io.ComfyNode):
         return io.NodeOutput(blended_image)
 
 
+class FrakturPadNode(io.ComfyNode):
+    """
+    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="Frakturpad",
+            display_name="Frakturpad (Text Obfuscation)",
+            category="text",
+            inputs=[
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    default="",
+                    placeholder="Enter text to convert..."
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="fraktur_text"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, text: str) -> io.NodeOutput:
+        """
+        Execute the frakturpad conversion.
+        """
+        result = frakturpad(text)
+        return io.NodeOutput(result)
+
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -590,6 +689,7 @@ class SamplingUtils(ComfyExtension):
             ModifyMask,
             ImageBlendByMask,
             SystemMessagePresets,
+            FrakturPadNode,
         ]
 
 
