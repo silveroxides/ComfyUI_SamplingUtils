@@ -1,7 +1,9 @@
 import sys
+import os
 import json
 import re
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+import random
+from PIL import Image, ImageOps, ImageDraw, ImageFilter, ImageFont
 from typing import Union, List, Tuple
 import torch
 import numpy as np
@@ -15,23 +17,34 @@ from comfy import model_management
 import nodes
 import node_helpers
 from nodes import MAX_RESOLUTION
-from .system_messages import SYSTEM_MESSAGE, SYSTEM_MESSAGE_UPSAMPLING_I2I, SYSTEM_MESSAGE_UPSAMPLING_T2I
+from .system_messages import (
+    SYSTEM_MESSAGE,
+    SYSTEM_MESSAGE_UPSAMPLING_I2I,
+    SYSTEM_MESSAGE_UPSAMPLING_T2I,
+)
 
 
 def round_to_nearest(n, m):
     return int((n + (m / 2)) // m) * m
 
+
 # Tensor to PIL
 def simpletensor2pil(image):
-    return Image.fromarray(np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+    return Image.fromarray(
+        np.clip(255.0 * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+    )
+
+
 # PIL to Tensor
 def simplepil2tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
 
 def pil2tensor(image: Union[Image.Image, List[Image.Image]]) -> torch.Tensor:
     if isinstance(image, list):
         return torch.cat([pil2tensor(img) for img in image], dim=0)
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
 
 def tensor2pil(image: torch.Tensor) -> List[Image.Image]:
     batch_count = image.size(0) if len(image.shape) > 3 else 1
@@ -90,16 +103,16 @@ def to_bold_fraktur(text: str) -> str:
     BOLD_FRAKTUR_LOWER_START = 0x1D586
 
     for char in text:
-        if 'A' <= char <= 'Z':
-            offset = ord(char) - ord('A')
+        if "A" <= char <= "Z":
+            offset = ord(char) - ord("A")
             result.append(chr(BOLD_FRAKTUR_UPPER_START + offset))
-        elif 'a' <= char <= 'z':
-            offset = ord(char) - ord('a')
+        elif "a" <= char <= "z":
+            offset = ord(char) - ord("a")
             result.append(chr(BOLD_FRAKTUR_LOWER_START + offset))
         else:
             result.append(char)
 
-    return ''.join(result)
+    return "".join(result)
 
 
 def frakturpad(text: str) -> str:
@@ -112,6 +125,64 @@ def frakturpad(text: str) -> str:
     return pad_text_with_joiners(fraktur_text)
 
 
+def from_bold_fraktur(text: str) -> str:
+    """
+    Convert all Unicode mathematical bold fraktur letters in a string
+    back to their ASCII counterparts.
+
+    Parameters:
+        text (str): Input string containing bold fraktur characters
+
+    Returns:
+        str: String with bold fraktur letters converted back to ASCII
+    """
+    result = []
+
+    # Bold fraktur uppercase starts at U+1D56C (𝕬)
+    # Bold fraktur lowercase starts at U+1D586 (𝖆)
+    BOLD_FRAKTUR_UPPER_START = 0x1D56C
+    BOLD_FRAKTUR_UPPER_END = BOLD_FRAKTUR_UPPER_START + 25  # Z
+    BOLD_FRAKTUR_LOWER_START = 0x1D586
+    BOLD_FRAKTUR_LOWER_END = BOLD_FRAKTUR_LOWER_START + 25  # z
+
+    for char in text:
+        code_point = ord(char)
+        if BOLD_FRAKTUR_UPPER_START <= code_point <= BOLD_FRAKTUR_UPPER_END:
+            offset = code_point - BOLD_FRAKTUR_UPPER_START
+            result.append(chr(ord("A") + offset))
+        elif BOLD_FRAKTUR_LOWER_START <= code_point <= BOLD_FRAKTUR_LOWER_END:
+            offset = code_point - BOLD_FRAKTUR_LOWER_START
+            result.append(chr(ord("a") + offset))
+        else:
+            result.append(char)
+
+    return "".join(result)
+
+
+def remove_joiners(text: str) -> str:
+    """
+    Remove all word joiner unicode characters (U+2060) from the text.
+
+    Parameters:
+        text (str): Input string potentially containing word joiners
+
+    Returns:
+        str: String with all word joiner characters removed
+    """
+    padding_char = "\u2060"
+    return text.replace(padding_char, "")
+
+
+def unfrakturpad(text: str) -> str:
+    """
+    Inverse of frakturpad: remove word joiners and convert bold fraktur back to ASCII.
+    First removes word joiner characters (U+2060), then converts bold fraktur
+    letters back to their A-Z and a-z equivalents.
+    """
+    text_without_joiners = remove_joiners(text)
+    return from_bold_fraktur(text_without_joiners)
+
+
 class SamplingParameters(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -119,14 +190,51 @@ class SamplingParameters(io.ComfyNode):
             node_id="SamplingParameters",
             category="utils",
             inputs=[
-                io.Int.Input(id="width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
-                io.Int.Input(id="height", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
+                io.Int.Input(
+                    id="width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16
+                ),
+                io.Int.Input(
+                    id="height", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16
+                ),
                 io.Int.Input(id="batch_size", default=1, min=1, max=4096),
-                io.Float.Input(id="scale_by", default=1.0, min=0.0, max=10.0, step=0.01, tooltip="How much to upscale initial resolution by for the upscaled one."),
-                io.Int.Input(id="multiple", default=16, min=4, max=128, step=4, tooltip="Nearest multiple of the result to set the upscaled resolution to."),
-                io.Int.Input(id="steps", default=26, min=1, max=10000, step=1, tooltip="How many steps to run the sampling for."),
-                io.Float.Input(id="cfg", default=3.5, min=-100.0, max=100.0, step=0.01, tooltip="The amount of influence your prompot will have on the final image."),
-                io.Int.Input(id="seed", min=-sys.maxsize, max=sys.maxsize, control_after_generate=True),
+                io.Float.Input(
+                    id="scale_by",
+                    default=1.0,
+                    min=0.0,
+                    max=10.0,
+                    step=0.01,
+                    tooltip="How much to upscale initial resolution by for the upscaled one.",
+                ),
+                io.Int.Input(
+                    id="multiple",
+                    default=16,
+                    min=4,
+                    max=128,
+                    step=4,
+                    tooltip="Nearest multiple of the result to set the upscaled resolution to.",
+                ),
+                io.Int.Input(
+                    id="steps",
+                    default=26,
+                    min=1,
+                    max=10000,
+                    step=1,
+                    tooltip="How many steps to run the sampling for.",
+                ),
+                io.Float.Input(
+                    id="cfg",
+                    default=3.5,
+                    min=-100.0,
+                    max=100.0,
+                    step=0.01,
+                    tooltip="The amount of influence your prompot will have on the final image.",
+                ),
+                io.Int.Input(
+                    id="seed",
+                    min=-sys.maxsize,
+                    max=sys.maxsize,
+                    control_after_generate=True,
+                ),
             ],
             outputs=[
                 io.Int.Output(display_name="width"),
@@ -144,20 +252,52 @@ class SamplingParameters(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, *, width: int, height: int, batch_size: int=1, scale_by: float, multiple: int, steps: int, cfg: float, seed: int) -> io.NodeOutput:
-        upscaled_width = round_to_nearest(int(width*scale_by), int(multiple))
-        upscaled_height = round_to_nearest(int(height*scale_by), int(multiple))
+    def execute(
+        cls,
+        *,
+        width: int,
+        height: int,
+        batch_size: int = 1,
+        scale_by: float,
+        multiple: int,
+        steps: int,
+        cfg: float,
+        seed: int,
+    ) -> io.NodeOutput:
+        upscaled_width = round_to_nearest(int(width * scale_by), int(multiple))
+        upscaled_height = round_to_nearest(int(height * scale_by), int(multiple))
         if scale_by > 2.0:
-            tile_width = round_to_nearest(int((upscaled_width - (width / scale_by)) / scale_by), int(multiple))
-            tile_height = round_to_nearest(int((upscaled_height - (height / scale_by)) / scale_by), int(multiple))
-            tile_padding = round_to_nearest(int(max(width, height) - max(tile_width, tile_height)), int(multiple))
+            tile_width = round_to_nearest(
+                int((upscaled_width - (width / scale_by)) / scale_by), int(multiple)
+            )
+            tile_height = round_to_nearest(
+                int((upscaled_height - (height / scale_by)) / scale_by), int(multiple)
+            )
+            tile_padding = round_to_nearest(
+                int(max(width, height) - max(tile_width, tile_height)), int(multiple)
+            )
         else:
             tile_width = round_to_nearest(int(upscaled_width * 0.5), int(multiple))
             tile_height = round_to_nearest(int(upscaled_height * 0.5), int(multiple))
-            tile_padding = round_to_nearest(int(max(width, height) - max(tile_width, tile_height)), int(multiple))
+            tile_padding = round_to_nearest(
+                int(max(width, height) - max(tile_width, tile_height)), int(multiple)
+            )
         width = round_to_nearest(int(width), int(multiple))
         height = round_to_nearest(int(height), int(multiple))
-        return io.NodeOutput(width, height, batch_size, upscaled_width, upscaled_height, steps, cfg, seed, tile_width, tile_height, tile_padding)
+        return io.NodeOutput(
+            width,
+            height,
+            batch_size,
+            upscaled_width,
+            upscaled_height,
+            steps,
+            cfg,
+            seed,
+            tile_width,
+            tile_height,
+            tile_padding,
+        )
+
 
 class GetJsonKeyValue(io.ComfyNode):
     @classmethod
@@ -166,18 +306,35 @@ class GetJsonKeyValue(io.ComfyNode):
             node_id="GetJsonKeyValue",
             category="utils",
             inputs=[
-                io.String.Input("json_path", default="./input/JSON_KeyValueStore.json", multiline=False, tooltip="Path to a .json file with simple top level structure with key and value. See example in custom node folder."),
-                io.Combo.Input("key_id_method", options=["custom", "random_rotate", "increment_rotate"]),
-                io.Int.Input("rotation_interval", default=0, tooltip="how many steps to jump when doing rotate."),
-                io.String.Input("key_id", default="placeholder", multiline=False, tooltip="Put name of key in the .json here if using custom in key_id_method."),
+                io.String.Input(
+                    "json_path",
+                    default="./input/JSON_KeyValueStore.json",
+                    multiline=False,
+                    tooltip="Path to a .json file with simple top level structure with key and value. See example in custom node folder.",
+                ),
+                io.Combo.Input(
+                    "key_id_method",
+                    options=["custom", "random_rotate", "increment_rotate"],
+                ),
+                io.Int.Input(
+                    "rotation_interval",
+                    default=0,
+                    tooltip="how many steps to jump when doing rotate.",
+                ),
+                io.String.Input(
+                    "key_id",
+                    default="placeholder",
+                    multiline=False,
+                    tooltip="Put name of key in the .json here if using custom in key_id_method.",
+                ),
             ],
-            outputs=[
-                io.String.Output(display_name="key_value")
-            ],
+            outputs=[io.String.Output(display_name="key_value")],
         )
 
     @classmethod
-    def execute(cls, json_path, key_id_method, rotation_interval, key_id="placeholder") -> io.NodeOutput:
+    def execute(
+        cls, json_path, key_id_method, rotation_interval, key_id="placeholder"
+    ) -> io.NodeOutput:
         """
         Loads API keys from a JSON file (top-level dictionary)
         and selects one based on the specified method.
@@ -197,32 +354,45 @@ class GetJsonKeyValue(io.ComfyNode):
         absolute_json_path = os.path.abspath(json_path)
 
         try:
-            with open(absolute_json_path, 'r') as f:
+            with open(absolute_json_path, "r") as f:
                 api_keys_data = json.load(f)
         except FileNotFoundError:
-            raise ValueError(f"RotateKeyAPI Error: JSON file not found at {absolute_json_path}")
+            raise ValueError(
+                f"RotateKeyAPI Error: JSON file not found at {absolute_json_path}"
+            )
         except json.JSONDecodeError:
-            raise ValueError(f"RotateKeyAPI Error: Could not decode JSON from {absolute_json_path}. Check file format.")
+            raise ValueError(
+                f"RotateKeyAPI Error: Could not decode JSON from {absolute_json_path}. Check file format."
+            )
         except Exception as e:
-            raise RuntimeError(f"RotateKeyAPI Error: Unexpected error reading file {absolute_json_path}: {e}")
+            raise RuntimeError(
+                f"RotateKeyAPI Error: Unexpected error reading file {absolute_json_path}: {e}"
+            )
 
         if not isinstance(api_keys_data, dict):
-            raise ValueError(f"RotateKeyAPI Error: JSON content is not a dictionary in {absolute_json_path}. Expected format: {{'key_id': 'api_key', ...}}")
+            raise ValueError(
+                f"RotateKeyAPI Error: JSON content is not a dictionary in {absolute_json_path}. Expected format: {{'key_id': 'api_key', ...}}"
+            )
 
         if not api_keys_data:
-             raise ValueError(f"RotateKeyAPI Error: The JSON dictionary in {absolute_json_path} is empty.")
+            raise ValueError(
+                f"RotateKeyAPI Error: The JSON dictionary in {absolute_json_path} is empty."
+            )
 
         selected_key_value = None
 
         if key_id_method == "custom":
             if key_id == "placeholder":
-                 print("RotateKeyAPI Warning: 'custom' method selected but 'key_id' is still the default 'placeholder'. Ensure this is intended or provide a valid key ID.")
+                print(
+                    "RotateKeyAPI Warning: 'custom' method selected but 'key_id' is still the default 'placeholder'. Ensure this is intended or provide a valid key ID."
+                )
 
             selected_key_value = api_keys_data.get(key_id)
 
             if selected_key_value is None:
-                 raise ValueError(f"RotateKeyAPI Error: Custom key ID '{key_id}' not found in the JSON dictionary keys.")
-
+                raise ValueError(
+                    f"RotateKeyAPI Error: Custom key ID '{key_id}' not found in the JSON dictionary keys."
+                )
 
         elif key_id_method == "random_rotate":
             api_keys_list = list(api_keys_data.values())
@@ -230,23 +400,31 @@ class GetJsonKeyValue(io.ComfyNode):
             selected_key_value = random.choice(api_keys_list)
 
         elif key_id_method == "increment_rotate":
-             api_keys_list = list(api_keys_data.values())
+            api_keys_list = list(api_keys_data.values())
 
-             index = rotation_interval % len(api_keys_list)
+            index = rotation_interval % len(api_keys_list)
 
-             try:
+            try:
                 selected_key_value = api_keys_list[index]
-             except IndexError:
-                 raise IndexError(f"RotateKeyAPI Error: Calculated index {index} (from interval {rotation_interval}) is out of bounds for list of size {len(api_keys_list)}.")
-             except Exception as e:
-                  raise RuntimeError(f"RotateKeyAPI Error: Unexpected error accessing item at index {index}: {e}")
+            except IndexError:
+                raise IndexError(
+                    f"RotateKeyAPI Error: Calculated index {index} (from interval {rotation_interval}) is out of bounds for list of size {len(api_keys_list)}."
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"RotateKeyAPI Error: Unexpected error accessing item at index {index}: {e}"
+                )
 
         if not isinstance(selected_key_value, str) or not selected_key_value:
-             raise ValueError(f"RotateKeyAPI Error: Retrieved value for selected key is not a valid string. Value: {selected_key_value}")
+            raise ValueError(
+                f"RotateKeyAPI Error: Retrieved value for selected key is not a valid string. Value: {selected_key_value}"
+            )
 
-
-        print(f"RotateKeyAPI: Successfully retrieved API key using method '{key_id_method}'.")
+        print(
+            f"RotateKeyAPI: Successfully retrieved API key using method '{key_id_method}'."
+        )
         return io.NodeOutput(selected_key_value)
+
 
 class Image_Color_Noise(io.ComfyNode):
     @classmethod
@@ -258,9 +436,14 @@ class Image_Color_Noise(io.ComfyNode):
                 io.Int.Input("width", default=512, max=4096, min=64, step=1),
                 io.Int.Input("height", default=512, max=4096, min=64, step=1),
                 io.Float.Input("frequency", default=0.5, max=100.0, min=0.0, step=0.01),
-                io.Float.Input("attenuation", default=0.5, max=100.0, min=0.0, step=0.01),
-                io.Combo.Input("noise_type", options=["grey", "white", "red", "pink", "green", "blue", "mix"]),
-                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
+                io.Float.Input(
+                    "attenuation", default=0.5, max=100.0, min=0.0, step=0.01
+                ),
+                io.Combo.Input(
+                    "noise_type",
+                    options=["grey", "white", "red", "pink", "green", "blue", "mix"],
+                ),
+                io.Int.Input("seed", default=0, min=0, max=0xFFFFFFFFFFFFFFFF),
             ],
             outputs=[
                 io.Image.Output(display_name="noise_image"),
@@ -271,14 +454,19 @@ class Image_Color_Noise(io.ComfyNode):
     def execute(cls, width, height, frequency, attenuation, noise_type, seed):
         generator = torch.Generator()
         generator.manual_seed(seed)
-        noise_image = cls.generate_power_noise(width, height, frequency, attenuation, noise_type, generator)
+        noise_image = cls.generate_power_noise(
+            width, height, frequency, attenuation, noise_type, generator
+        )
         return io.NodeOutput(pil2tensor(noise_image))
 
     @classmethod
-    def generate_power_noise(cls, width, height, frequency, attenuation, noise_type, generator):
-
+    def generate_power_noise(
+        cls, width, height, frequency, attenuation, noise_type, generator
+    ):
         def normalize_array(arr):
-            return (255 * (arr - np.min(arr)) / (np.max(arr) - np.min(arr))).astype(np.uint8)
+            return (255 * (arr - np.min(arr)) / (np.max(arr) - np.min(arr))).astype(
+                np.uint8
+            )
 
         def white_noise(w, h, gen):
             return torch.rand(h, w, generator=gen).numpy()
@@ -292,7 +480,7 @@ class Image_Color_Noise(io.ComfyNode):
             fx = np.fft.fftfreq(w)
             f = np.sqrt(fx**2 + fy**2)
             f[0, 0] = 1.0
-            power_spectrum = f ** power_modifier
+            power_spectrum = f**power_modifier
             fft_noise = np.fft.fft2(noise)
             fft_modified = fft_noise * power_spectrum
             inv_fft = np.fft.ifft2(fft_modified)
@@ -302,7 +490,9 @@ class Image_Color_Noise(io.ComfyNode):
         zeros_channel = np.zeros((height, width), dtype=np.uint8)
 
         if noise_type == "grey":
-            luma = normalize_array(grey_noise_texture(width, height, attenuation, generator))
+            luma = normalize_array(
+                grey_noise_texture(width, height, attenuation, generator)
+            )
             noise_array = np.stack([luma, luma, luma], axis=-1)
 
         elif noise_type == "white":
@@ -331,16 +521,23 @@ class Image_Color_Noise(io.ComfyNode):
             noise_array = np.stack([r, g, b], axis=-1)
 
         elif noise_type == "mix":
-            r = normalize_array(fourier_noise(width, height, attenuation, -1.0, generator)) # Pink Frequency
-            g = normalize_array(fourier_noise(width, height, attenuation, 0.5, generator))  # Green Frequency
-            b = normalize_array(fourier_noise(width, height, attenuation, 1.0, generator))   # Blue Frequency
+            r = normalize_array(
+                fourier_noise(width, height, attenuation, -1.0, generator)
+            )  # Pink Frequency
+            g = normalize_array(
+                fourier_noise(width, height, attenuation, 0.5, generator)
+            )  # Green Frequency
+            b = normalize_array(
+                fourier_noise(width, height, attenuation, 1.0, generator)
+            )  # Blue Frequency
             noise_array = np.stack([r, g, b], axis=-1)
 
         else:
-            cstr(f"Unsupported noise type `{noise_type}`").error.print()
+            print(f"[ERROR] Unsupported noise type `{noise_type}`")
             return Image.new("RGB", (width, height), color="black")
 
-        return Image.fromarray(noise_array, 'RGB')
+        return Image.fromarray(noise_array, "RGB")
+
 
 class SystemMessagePresets(io.ComfyNode):
     @classmethod
@@ -349,11 +546,15 @@ class SystemMessagePresets(io.ComfyNode):
             node_id="SystemMessagePresets",
             category="advanced/conditioning",
             inputs=[
-                io.Combo.Input("preset", options=[
-                    "F2_SYSTEM_MESSAGE",
-                    "F2_SYSTEM_MESSAGE_UPSAMPLING_I2I",
-                    "F2_SYSTEM_MESSAGE_UPSAMPLING_T2I"
-                ], default="F2_SYSTEM_MESSAGE"),
+                io.Combo.Input(
+                    "preset",
+                    options=[
+                        "F2_SYSTEM_MESSAGE",
+                        "F2_SYSTEM_MESSAGE_UPSAMPLING_I2I",
+                        "F2_SYSTEM_MESSAGE_UPSAMPLING_T2I",
+                    ],
+                    default="F2_SYSTEM_MESSAGE",
+                ),
             ],
             outputs=[
                 io.String.Output(display_name="system_prompt"),
@@ -369,6 +570,7 @@ class SystemMessagePresets(io.ComfyNode):
         }
         system_prompt = presets_dict.get(preset, "")
         return io.NodeOutput(system_prompt)
+
 
 class TextEncodeFlux2SystemPrompt(io.ComfyNode):
     @classmethod
@@ -399,6 +601,7 @@ class TextEncodeFlux2SystemPrompt(io.ComfyNode):
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning)
 
+
 class TextEncodeZITSystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -419,7 +622,9 @@ class TextEncodeZITSystemPrompt(io.ComfyNode):
     def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
         if len(system_prompt) > 0:
             template_prefix = "<|im_start|>system\n"
-            template_suffix = "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+            template_suffix = (
+                "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+            )
             llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
             tokens = clip.tokenize(prompt, llama_template=llama_template)
         else:
@@ -427,6 +632,7 @@ class TextEncodeZITSystemPrompt(io.ComfyNode):
 
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning)
+
 
 class ModifyMask(io.ComfyNode):
     @classmethod
@@ -436,13 +642,21 @@ class ModifyMask(io.ComfyNode):
             category="utils/mask",
             inputs=[
                 io.Mask.Input("mask"),
-                io.Int.Input("expand", default=0, max=MAX_RESOLUTION, min=-MAX_RESOLUTION, step=1),
-                io.Float.Input("incremental_expandrate", default=0.0, max=100.0, min=0.0, step=0.01),
+                io.Int.Input(
+                    "expand", default=0, max=MAX_RESOLUTION, min=-MAX_RESOLUTION, step=1
+                ),
+                io.Float.Input(
+                    "incremental_expandrate", default=0.0, max=100.0, min=0.0, step=0.01
+                ),
                 io.Boolean.Input("tapered_corners", default=True),
                 io.Boolean.Input("flip_input", default=False),
-                io.Float.Input("blur_radius", default=0.0, max=100.0, min=0.0, step=0.01),
+                io.Float.Input(
+                    "blur_radius", default=0.0, max=100.0, min=0.0, step=0.01
+                ),
                 io.Float.Input("lerp_alpha", default=1.0, max=1.0, min=0.0, step=0.01),
-                io.Float.Input("decay_factor", default=1.0, max=1.0, min=0.0, step=0.01),
+                io.Float.Input(
+                    "decay_factor", default=1.0, max=1.0, min=0.0, step=0.01
+                ),
                 io.Boolean.Input("fill_holes", default=False, optional=True),
             ],
             outputs=[
@@ -452,9 +666,19 @@ class ModifyMask(io.ComfyNode):
         )
 
     @classmethod
-    def execute(self, mask, expand, tapered_corners, flip_input, blur_radius, incremental_expandrate, lerp_alpha, decay_factor, fill_holes=False):
+    def execute(
+        self,
+        mask,
+        expand,
+        tapered_corners,
+        flip_input,
+        blur_radius,
+        incremental_expandrate,
+        lerp_alpha,
+        decay_factor,
+        fill_holes=False,
+    ):
         import kornia.morphology as morph
-
 
         alpha = lerp_alpha
         decay = decay_factor
@@ -469,23 +693,31 @@ class ModifyMask(io.ComfyNode):
         growmask = mask.reshape((-1, mask.shape[-2], mask.shape[-1]))
 
         # Prepare original mask for processing loop (match dimensions)
-        original_mask_batches = original_mask_input.reshape((-1, mask.shape[-2], mask.shape[-1]))
+        original_mask_batches = original_mask_input.reshape(
+            (-1, mask.shape[-2], mask.shape[-1])
+        )
 
         out = []
         previous_output = None
         current_expand = expand
         for m in tqdm(growmask, desc="Expanding/Contracting Mask"):
-            output = m.unsqueeze(0).unsqueeze(0).to(model_management.get_torch_device())  # Add batch and channel dims for kornia
+            output = (
+                m.unsqueeze(0).unsqueeze(0).to(model_management.get_torch_device())
+            )  # Add batch and channel dims for kornia
             if abs(round(current_expand)) > 0:
                 # Create kernel - kornia expects kernel on same device as input
                 if tapered_corners:
-                    kernel = torch.tensor([[0, 1, 0],
-                                        [1, 1, 1],
-                                        [0, 1, 0]], dtype=torch.float32, device=output.device)
+                    kernel = torch.tensor(
+                        [[0, 1, 0], [1, 1, 1], [0, 1, 0]],
+                        dtype=torch.float32,
+                        device=output.device,
+                    )
                 else:
-                    kernel = torch.tensor([[1, 1, 1],
-                                        [1, 1, 1],
-                                        [1, 1, 1]], dtype=torch.float32, device=output.device)
+                    kernel = torch.tensor(
+                        [[1, 1, 1], [1, 1, 1], [1, 1, 1]],
+                        dtype=torch.float32,
+                        device=output.device,
+                    )
 
                 for _ in range(abs(round(current_expand))):
                     if current_expand < 0:
@@ -568,23 +800,29 @@ class ImageBlendByMask(io.ComfyNode):
             inputs=[
                 io.Image.Input("destination"),
                 io.Image.Input("source"),
-                io.Combo.Input("mode", options=[
-                    "add",
-                    "color",
-                    "color_burn",
-                    "color_dodge",
-                    "darken",
-                    "difference",
-                    "exclusion",
-                    "hard_light",
-                    "hue",
-                    "lighten",
-                    "multiply",
-                    "overlay",
-                    "screen",
-                    "soft_light"
-                ], default="add"),
-                io.Float.Input("blend_percentage", default=1.0, max=1.0, min=0.0, step=0.01),
+                io.Combo.Input(
+                    "mode",
+                    options=[
+                        "add",
+                        "color",
+                        "color_burn",
+                        "color_dodge",
+                        "darken",
+                        "difference",
+                        "exclusion",
+                        "hard_light",
+                        "hue",
+                        "lighten",
+                        "multiply",
+                        "overlay",
+                        "screen",
+                        "soft_light",
+                    ],
+                    default="add",
+                ),
+                io.Float.Input(
+                    "blend_percentage", default=1.0, max=1.0, min=0.0, step=0.01
+                ),
                 io.Boolean.Input("resize_source", default=False),
                 io.Mask.Input("mask"),
             ],
@@ -594,14 +832,25 @@ class ImageBlendByMask(io.ComfyNode):
         )
 
     @classmethod
-    def execute(self, destination, source, mode='add', blend_percentage=1.0, resize_source=False, mask=None):
-
+    def execute(
+        self,
+        destination,
+        source,
+        mode="add",
+        blend_percentage=1.0,
+        resize_source=False,
+        mask=None,
+    ):
         destination, source = node_helpers.image_alpha_fix(destination, source)
         destination = destination.clone().movedim(-1, 1)
         source = source.movedim(-1, 1).to(destination.device)
 
         if resize_source:
-            source = torch.nn.functional.interpolate(source, size=(destination.shape[-2], destination.shape[-1]), mode="bicubic")
+            source = torch.nn.functional.interpolate(
+                source,
+                size=(destination.shape[-2], destination.shape[-1]),
+                mode="bicubic",
+            )
 
         # Convert images to PIL
         img_a = simpletensor2pil(destination)
@@ -622,7 +871,7 @@ class ImageBlendByMask(io.ComfyNode):
             "add": pilgram.css.blending.normal,
             "overlay": pilgram.css.blending.overlay,
             "screen": pilgram.css.blending.screen,
-            "soft_light": pilgram.css.blending.soft_light
+            "soft_light": pilgram.css.blending.soft_light,
         }
 
         out_image = blending_modes.get(mode, pilgram.css.blending.normal)(img_a, img_b)
@@ -631,11 +880,13 @@ class ImageBlendByMask(io.ComfyNode):
 
         # Apply mask if provided
         if mask is not None:
-            mask = ImageOps.invert(simpletensor2pil(mask).convert('L'))
+            mask = ImageOps.invert(simpletensor2pil(mask).convert("L"))
             out_image = Image.composite(img_a, out_image, mask.resize(img_a.size))
 
         # Blend image based on blend percentage
-        blend_mask = Image.new(mode="L", size=img_a.size, color=(round(blend_percentage * 255)))
+        blend_mask = Image.new(
+            mode="L", size=img_a.size, color=(round(blend_percentage * 255))
+        )
         blend_mask = ImageOps.invert(blend_mask)
         out_image = Image.composite(img_a, out_image, blend_mask)
 
@@ -659,7 +910,7 @@ class FrakturPadNode(io.ComfyNode):
                     "text",
                     multiline=True,
                     default="",
-                    placeholder="Enter text to convert..."
+                    placeholder="Enter text to convert...",
                 ),
             ],
             outputs=[
@@ -676,6 +927,39 @@ class FrakturPadNode(io.ComfyNode):
         return io.NodeOutput(result)
 
 
+class UnFrakturPadNode(io.ComfyNode):
+    """
+    ComfyUI node that deobfuscates text by converting bold fraktur back to ASCII
+    and removing word joiner padding. This is the inverse of FrakturPadNode.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="FrakturUnpad",
+            display_name="Fraktur Unpad (Text Deobfuscation)",
+            category="text",
+            inputs=[
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    default="",
+                    placeholder="Enter obfuscated text to convert back...",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="plain_text"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, text: str) -> io.NodeOutput:
+        """
+        Execute the unfrakturpad conversion.
+        """
+        result = unfrakturpad(text)
+        return io.NodeOutput(result)
+
 
 class SamplingUtils(ComfyExtension):
     @override
@@ -690,6 +974,7 @@ class SamplingUtils(ComfyExtension):
             ImageBlendByMask,
             SystemMessagePresets,
             FrakturPadNode,
+            UnFrakturPadNode,
         ]
 
 
