@@ -936,8 +936,8 @@ class UnFrakturPadNode(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="FrakturUnpad",
-            display_name="Fraktur Unpad (Text Deobfuscation)",
+            node_id="UnFrakturPad",
+            display_name="UnFrakturPad (Text Deobfuscation)",
             category="text",
             inputs=[
                 io.String.Input(
