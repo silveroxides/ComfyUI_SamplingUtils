@@ -3,7 +3,7 @@ import os
 import json
 import re
 import random
-from PIL import Image, ImageOps, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageOps, ImageDraw, ImageFilter, ImageFont, ImageSequence
 from typing import Union, List, Tuple
 import torch
 import numpy as np
@@ -16,6 +16,7 @@ from comfy_api.latest import ComfyExtension, io
 from comfy import model_management
 import nodes
 import node_helpers
+import folder_paths
 from nodes import MAX_RESOLUTION
 from .system_messages import (
     SYSTEM_MESSAGE,
@@ -961,6 +962,123 @@ class UnFrakturPadNode(io.ComfyNode):
         return io.NodeOutput(result)
 
 
+class SU_LoadImagePath(io.ComfyNode):
+    """
+    Load an image from an arbitrary file path with proper mask handling.
+    Returns the image and a mask extracted from the alpha channel.
+    For images without alpha, returns a full-sized zero mask (not 64x64).
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="SU_LoadImagePath",
+            display_name="Load Image (Path)",
+            category="image",
+            inputs=[
+                io.String.Input(
+                    "image_path",
+                    multiline=False,
+                    placeholder="X://path/to/image.png",
+                    tooltip="Absolute path to the image file to load.",
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="IMAGE"),
+                io.Mask.Output(display_name="MASK"),
+                io.Mask.Output(display_name="MASK_INVERTED"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, image_path: str) -> io.NodeOutput:
+        # Validate path
+        if not image_path or not os.path.isfile(image_path):
+            raise ValueError(f"Invalid image path: {image_path}")
+
+        img = node_helpers.pillow(Image.open, image_path)
+
+        output_images = []
+        output_masks = []
+        w, h = None, None
+
+        for i in ImageSequence.Iterator(img):
+            i = node_helpers.pillow(ImageOps.exif_transpose, i)
+
+            # Handle 16-bit images (mode 'I') - normalize by 65535, not 255
+            if i.mode == 'I':
+                i = i.point(lambda x: x * (1 / 65535))
+
+            image = i.convert("RGB")
+
+            # Set dimensions from first frame
+            if len(output_images) == 0:
+                w = image.size[0]
+                h = image.size[1]
+
+            # Skip frames with different dimensions
+            if image.size[0] != w or image.size[1] != h:
+                continue
+
+            # Convert to tensor
+            image_np = np.array(image).astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_np)[None,]
+
+            # Extract mask from alpha channel
+            if 'A' in i.getbands():
+                # RGBA image - extract alpha
+                mask_np = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+                mask = 1.0 - torch.from_numpy(mask_np)
+            elif i.mode == 'P' and 'transparency' in i.info:
+                # Palette mode with transparency - convert to RGBA (already transposed)
+                rgba = i.convert('RGBA')
+                mask_np = np.array(rgba.getchannel('A')).astype(np.float32) / 255.0
+                mask = 1.0 - torch.from_numpy(mask_np)
+            else:
+                # No alpha - return full-sized zero mask (NOT 64x64!)
+                mask = torch.zeros((h, w), dtype=torch.float32, device="cpu")
+
+            output_images.append(image_tensor)
+            output_masks.append(mask.unsqueeze(0))
+
+            # MPO format: only use first frame
+            if img.format == "MPO":
+                break
+
+        if len(output_images) == 0:
+            raise ValueError(f"No valid image frames could be loaded from: {image_path}")
+
+        # Stack frames
+        if len(output_images) > 1:
+            output_image = torch.cat(output_images, dim=0)
+            output_mask = torch.cat(output_masks, dim=0)
+        else:
+            output_image = output_images[0]
+            output_mask = output_masks[0]
+
+        # Create inverted mask
+        output_mask_inverted = 1.0 - output_mask
+
+        return io.NodeOutput(output_image, output_mask, output_mask_inverted)
+
+    @classmethod
+    def IS_CHANGED(cls, image_path: str):
+        if not image_path or not os.path.isfile(image_path):
+            return ""
+        m = hashlib.sha256()
+        with open(image_path, 'rb') as f:
+            m.update(f.read())
+        return m.digest().hex()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, image_path: str):
+        if not image_path:
+            return "Image path cannot be empty"
+        if not os.path.isfile(image_path):
+            return f"Invalid image file: {image_path}"
+        return True
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -975,6 +1093,7 @@ class SamplingUtils(ComfyExtension):
             SystemMessagePresets,
             FrakturPadNode,
             UnFrakturPadNode,
+            SU_LoadImagePath,
         ]
 
 
