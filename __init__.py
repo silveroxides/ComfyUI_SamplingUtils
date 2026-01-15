@@ -603,6 +603,40 @@ class TextEncodeFlux2SystemPrompt(io.ComfyNode):
         return io.NodeOutput(conditioning)
 
 
+class TextEncodeKleinSystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeKleinSystemPrompt",
+            category="advanced/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
+        if len(system_prompt) > 0:
+            # qwen3 chat template with system prompt
+            template_prefix = "<|im_start|>system\n"
+            template_suffix = (
+                "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            )
+            llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
+            tokens = clip.tokenize(prompt, llama_template=llama_template)
+        else:
+            tokens = clip.tokenize(prompt)
+
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        return io.NodeOutput(conditioning)
+
+
 class TextEncodeZITSystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1087,6 +1121,7 @@ class SamplingUtils(ComfyExtension):
             GetJsonKeyValue,
             Image_Color_Noise,
             TextEncodeFlux2SystemPrompt,
+            TextEncodeKleinSystemPrompt,
             TextEncodeZITSystemPrompt,
             ModifyMask,
             ImageBlendByMask,
