@@ -669,6 +669,58 @@ class TextEncodeZITSystemPrompt(io.ComfyNode):
         return io.NodeOutput(conditioning)
 
 
+# Template definitions for unified node
+SYSTEM_PROMPT_TEMPLATES = {
+    "flux2dev": {
+        "prefix": r"[SYSTEM_PROMPT]",
+        "suffix": r"[/SYSTEM_PROMPT][INST]{}[/INST]",
+    },
+    "klein": {
+        "prefix": "<|im_start|>system\n",
+        "suffix": "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    },
+    "z-image": {
+        "prefix": "<|im_start|>system\n",
+        "suffix": "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+    },
+}
+
+
+class TextEncodeSystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeSystemPrompt",
+            category="advanced/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.Combo.Input(
+                    "model_type",
+                    options=["flux2dev", "klein", "z-image"],
+                    default="flux2dev",
+                    tooltip="Select the model type to use the correct template format.",
+                ),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, model_type, prompt, system_prompt=None) -> io.NodeOutput:
+        if len(system_prompt) > 0:
+            template = SYSTEM_PROMPT_TEMPLATES.get(model_type, SYSTEM_PROMPT_TEMPLATES["flux2dev"])
+            llama_template = f"{template['prefix']}{system_prompt}{template['suffix']}"
+            tokens = clip.tokenize(prompt, llama_template=llama_template)
+        else:
+            tokens = clip.tokenize(prompt)
+
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        return io.NodeOutput(conditioning)
+
+
 class ModifyMask(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1123,6 +1175,7 @@ class SamplingUtils(ComfyExtension):
             TextEncodeFlux2SystemPrompt,
             TextEncodeKleinSystemPrompt,
             TextEncodeZITSystemPrompt,
+            TextEncodeSystemPrompt,
             ModifyMask,
             ImageBlendByMask,
             SystemMessagePresets,
