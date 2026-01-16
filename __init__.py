@@ -846,7 +846,8 @@ class TextEncodeKleinThinking(io.ComfyNode):
         input_ids = input_ids.to(device)
 
         # Get embedding weights for lm_head (weight tying)
-        embed_weights = transformer.model.embed_tokens.weight
+        # Clone to GPU once for the generation loop
+        embed_weights = transformer.model.embed_tokens.weight.clone().to(device=device, dtype=torch.float32)
 
         # Generation loop
         generated_tokens = []
@@ -903,7 +904,7 @@ class TextEncodeKleinThinking(io.ComfyNode):
                 # Get last token's hidden state
                 last_hidden = x[:, -1, :]  # [1, hidden_dim]
 
-                # Compute logits using tied weights
+                # Compute logits using tied weights (already on GPU)
                 logits = last_hidden @ embed_weights.T  # [1, vocab_size]
 
                 # Apply temperature and sample
