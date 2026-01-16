@@ -628,20 +628,18 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
 
     @classmethod
     def execute(cls, clip, prompt, system_prompt="", thinking_content="") -> io.NodeOutput:
-        # Escape curly braces in thinking_content for .format()
-        escaped_thinking = thinking_content.replace("{", "{{").replace("}", "}}")
-        
+        # Build template using regular strings (ComfyUI pattern)
+        # {} is the placeholder for user prompt that .format() will fill
         if len(system_prompt) > 0:
-            # qwen3 chat template with system prompt
             llama_template = (
-                f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-                f"<|im_start|>user\n{{}}<|im_end|>\n"
-                f"<|im_start|>assistant\n<think>\n{escaped_thinking}\n</think>\n\n"
+                "<|im_start|>system\n" + system_prompt + "<|im_end|>\n"
+                "<|im_start|>user\n{}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
             )
         else:
             llama_template = (
                 "<|im_start|>user\n{}<|im_end|>\n"
-                f"<|im_start|>assistant\n<think>\n{escaped_thinking}\n</think>\n\n"
+                "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
             )
         
         tokens = clip.tokenize(prompt, llama_template=llama_template)
