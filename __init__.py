@@ -933,6 +933,14 @@ class TextEncodeKleinThinking(io.ComfyNode):
 
                 # Compute logits using tied weights (already on GPU)
                 logits = last_hidden @ embed_weights.T  # [1, vocab_size]
+                
+                # Debug: print logits stats on first step
+                if step == 0 and show_thinking:
+                    print(f"[Debug] Logits shape: {logits.shape}")
+                    print(f"[Debug] Logits min/max/mean: {logits.min().item():.4f} / {logits.max().item():.4f} / {logits.mean().item():.4f}")
+                    top_k_vals, top_k_ids = torch.topk(logits[0], k=10)
+                    top_tokens = [tokenizer.decode([tid.item()]) for tid in top_k_ids]
+                    print(f"[Debug] Top 10 tokens: {top_tokens}")
 
                 # Apply temperature and sample
                 if temperature > 0:
@@ -962,16 +970,19 @@ class TextEncodeKleinThinking(io.ComfyNode):
             print(f"{thinking_text}\n")
 
         # Now build the final template with the generated thinking
+        # Escape any curly braces in thinking_text to avoid .format() errors
+        escaped_thinking = thinking_text.replace("{", "{{").replace("}", "}}")
+        
         if len(system_prompt) > 0:
             final_template = (
                 f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
                 f"<|im_start|>user\n{{}}<|im_end|>\n"
-                f"<|im_start|>assistant\n<think>\n{thinking_text}\n</think>\n\n"
+                f"<|im_start|>assistant\n<think>\n{escaped_thinking}\n</think>\n\n"
             )
         else:
             final_template = (
                 "<|im_start|>user\n{}<|im_end|>\n"
-                f"<|im_start|>assistant\n<think>\n{thinking_text}\n</think>\n\n"
+                f"<|im_start|>assistant\n<think>\n{escaped_thinking}\n</think>\n\n"
             )
 
         # Tokenize and encode with the full thinking content
