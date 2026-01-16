@@ -612,7 +612,14 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
-                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True, default=""),
+                io.String.Input(
+                    "thinking_content",
+                    multiline=True,
+                    dynamic_prompts=True,
+                    default="",
+                    tooltip="Custom thinking content to inject. Leave empty for default.",
+                ),
             ],
             outputs=[
                 io.Conditioning.Output(),
@@ -620,19 +627,21 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, system_prompt="", thinking_content="") -> io.NodeOutput:
+        # Build template with string concat (ComfyUI pattern)
         if len(system_prompt) > 0:
-            # qwen3 chat template with system prompt
-            template_prefix = "<|im_start|>system\n"
-            template_suffix = (
-                "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n"
-                "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            llama_template = (
+                "<|im_start|>system\n" + system_prompt + "<|im_end|>\n"
+                "<|im_start|>user\n{}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
             )
-            llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
-            tokens = clip.tokenize(prompt, llama_template=llama_template)
         else:
-            tokens = clip.tokenize(prompt)
-
+            llama_template = (
+                "<|im_start|>user\n{}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
+            )
+        
+        tokens = clip.tokenize(prompt, llama_template=llama_template)
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning)
 
