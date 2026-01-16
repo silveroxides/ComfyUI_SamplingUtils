@@ -721,6 +721,238 @@ class TextEncodeSystemPrompt(io.ComfyNode):
         return io.NodeOutput(conditioning)
 
 
+class TextEncodeKleinThinking(io.ComfyNode):
+    """
+    Text encoder for Klein that generates actual thinking tokens using qwen3.
+    Uses weight-tied embed_tokens as lm_head for token generation.
+    """
+
+    # qwen3 special token IDs
+    THINK_START_TOKEN = 151667  # <think>
+    THINK_END_TOKEN = 151668    # </think>
+    IM_END_TOKEN = 151645       # <|im_end|>
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeKleinThinking",
+            display_name="Klein Text Encode (Thinking)",
+            category="advanced/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input(
+                    "system_prompt",
+                    multiline=True,
+                    dynamic_prompts=True,
+                    default="",
+                    tooltip="Optional system prompt. Leave empty for default.",
+                ),
+                io.Int.Input(
+                    "max_thinking_tokens",
+                    default=256,
+                    min=32,
+                    max=1024,
+                    step=32,
+                    tooltip="Maximum tokens to generate for thinking.",
+                ),
+                io.Float.Input(
+                    "temperature",
+                    default=0.7,
+                    min=0.0,
+                    max=2.0,
+                    step=0.05,
+                    tooltip="Sampling temperature. 0 = greedy, higher = more random.",
+                ),
+                io.Boolean.Input(
+                    "show_thinking",
+                    default=True,
+                    tooltip="Print generated thinking to console.",
+                ),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+                io.String.Output(display_name="thinking_text"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        clip,
+        prompt,
+        system_prompt="",
+        max_thinking_tokens=256,
+        temperature=0.7,
+        show_thinking=True,
+    ) -> io.NodeOutput:
+        import torch.nn.functional as F
+
+        # Build the prompt template with open <think> tag (no closing tag yet)
+        if len(system_prompt) > 0:
+            generation_template = (
+                f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+                f"<|im_start|>user\n{{}}<|im_end|>\n"
+                f"<|im_start|>assistant\n<think>\n"
+            )
+        else:
+            generation_template = (
+                "<|im_start|>user\n{}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n"
+            )
+
+        # Access the underlying clip model and tokenizer
+        # clip.cond_stage_model contains the actual model
+        cond_model = clip.cond_stage_model
+
+        # Get the tokenizer - for Klein it's under the qwen3 key
+        tokenizer_wrapper = clip.tokenizer
+
+        # Get the actual tokenizer object
+        if hasattr(tokenizer_wrapper, 'qwen3_4b'):
+            tokenizer = tokenizer_wrapper.qwen3_4b.tokenizer
+            model_key = 'qwen3_4b'
+        elif hasattr(tokenizer_wrapper, 'qwen3_8b'):
+            tokenizer = tokenizer_wrapper.qwen3_8b.tokenizer
+            model_key = 'qwen3_8b'
+        else:
+            # Fallback - try to get any available tokenizer
+            for attr in dir(tokenizer_wrapper):
+                obj = getattr(tokenizer_wrapper, attr, None)
+                if hasattr(obj, 'tokenizer'):
+                    tokenizer = obj.tokenizer
+                    model_key = attr
+                    break
+            else:
+                raise RuntimeError("Could not find qwen3 tokenizer in clip model")
+
+        # Format prompt with generation template
+        generation_prompt = generation_template.format(prompt)
+
+        # Tokenize for generation
+        input_ids = tokenizer.encode(generation_prompt, return_tensors="pt")
+
+        # Get the transformer model
+        if hasattr(cond_model, model_key):
+            clip_model_wrapper = getattr(cond_model, model_key)
+        else:
+            clip_model_wrapper = cond_model
+
+        # Get the actual transformer
+        transformer = clip_model_wrapper.transformer
+
+        # Get device
+        device = model_management.get_torch_device()
+        input_ids = input_ids.to(device)
+
+        # Get embedding weights for lm_head (weight tying)
+        embed_weights = transformer.model.embed_tokens.weight
+
+        # Generation loop
+        generated_tokens = []
+        thinking_text = ""
+
+        with torch.no_grad():
+            for step in range(max_thinking_tokens):
+                # Forward pass through the model
+                # We need to get the final hidden state
+                embeds = transformer.model.embed_tokens(input_ids, out_dtype=torch.float32)
+
+                # Apply normalization if needed
+                if transformer.model.normalize_in:
+                    embeds *= transformer.model.config.hidden_size ** 0.5
+
+                # Create position ids
+                position_ids = torch.arange(0, embeds.shape[1], device=device).unsqueeze(0)
+
+                # Create causal mask
+                seq_len = embeds.shape[1]
+                causal_mask = torch.triu(
+                    torch.full((seq_len, seq_len), float("-inf"), device=device),
+                    diagonal=1
+                )
+
+                # Compute freqs_cis for RoPE
+                from comfy.text_encoders.llama import precompute_freqs_cis
+                freqs_cis = precompute_freqs_cis(
+                    transformer.model.config.head_dim,
+                    position_ids,
+                    transformer.model.config.rope_theta,
+                    transformer.model.config.rope_scale,
+                    transformer.model.config.rope_dims,
+                    device=device
+                )
+
+                from comfy.ldm.modules.attention import optimized_attention_for_device
+                optimized_attention = optimized_attention_for_device(device, mask=True, small_input=True)
+
+                # Forward through layers
+                x = embeds
+                for layer in transformer.model.layers:
+                    x = layer(
+                        x=x,
+                        attention_mask=causal_mask,
+                        freqs_cis=freqs_cis,
+                        optimized_attention=optimized_attention,
+                    )
+
+                # Apply final norm if present
+                if transformer.model.norm is not None:
+                    x = transformer.model.norm(x)
+
+                # Get last token's hidden state
+                last_hidden = x[:, -1, :]  # [1, hidden_dim]
+
+                # Compute logits using tied weights
+                logits = last_hidden @ embed_weights.T  # [1, vocab_size]
+
+                # Apply temperature and sample
+                if temperature > 0:
+                    probs = F.softmax(logits / temperature, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                else:
+                    next_token = logits.argmax(dim=-1, keepdim=True)
+
+                next_token_id = next_token.item()
+
+                # Check for stop tokens
+                if next_token_id == cls.THINK_END_TOKEN:
+                    break
+
+                # Store generated token
+                generated_tokens.append(next_token_id)
+
+                # Append to input for next iteration
+                input_ids = torch.cat([input_ids, next_token], dim=1)
+
+        # Decode the generated thinking
+        if generated_tokens:
+            thinking_text = tokenizer.decode(generated_tokens, skip_special_tokens=False)
+
+        if show_thinking and thinking_text:
+            print(f"\n[Klein Thinking] Generated {len(generated_tokens)} tokens:")
+            print(f"{thinking_text}\n")
+
+        # Now build the final template with the generated thinking
+        if len(system_prompt) > 0:
+            final_template = (
+                f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+                f"<|im_start|>user\n{{}}<|im_end|>\n"
+                f"<|im_start|>assistant\n<think>\n{thinking_text}\n</think>\n\n"
+            )
+        else:
+            final_template = (
+                "<|im_start|>user\n{}<|im_end|>\n"
+                f"<|im_start|>assistant\n<think>\n{thinking_text}\n</think>\n\n"
+            )
+
+        # Tokenize and encode with the full thinking content
+        tokens = clip.tokenize(prompt, llama_template=final_template)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+
+        return io.NodeOutput(conditioning, thinking_text)
+
+
 class ModifyMask(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1176,6 +1408,7 @@ class SamplingUtils(ComfyExtension):
             TextEncodeKleinSystemPrompt,
             TextEncodeZITSystemPrompt,
             TextEncodeSystemPrompt,
+            TextEncodeKleinThinking,
             ModifyMask,
             ImageBlendByMask,
             SystemMessagePresets,
