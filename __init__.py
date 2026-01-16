@@ -612,7 +612,14 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
-                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True, default=""),
+                io.String.Input(
+                    "thinking_content",
+                    multiline=True,
+                    dynamic_prompts=True,
+                    default="",
+                    tooltip="Custom thinking content to inject. Leave empty for default (empty thinking).",
+                ),
             ],
             outputs=[
                 io.Conditioning.Output(),
@@ -620,19 +627,24 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, system_prompt="", thinking_content="") -> io.NodeOutput:
+        # Escape curly braces in thinking_content for .format()
+        escaped_thinking = thinking_content.replace("{", "{{").replace("}", "}}")
+        
         if len(system_prompt) > 0:
             # qwen3 chat template with system prompt
-            template_prefix = "<|im_start|>system\n"
-            template_suffix = (
-                "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n"
-                "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            llama_template = (
+                f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+                f"<|im_start|>user\n{{}}<|im_end|>\n"
+                f"<|im_start|>assistant\n<think>\n{escaped_thinking}\n</think>\n\n"
             )
-            llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
-            tokens = clip.tokenize(prompt, llama_template=llama_template)
         else:
-            tokens = clip.tokenize(prompt)
-
+            llama_template = (
+                "<|im_start|>user\n{}<|im_end|>\n"
+                f"<|im_start|>assistant\n<think>\n{escaped_thinking}\n</think>\n\n"
+            )
+        
+        tokens = clip.tokenize(prompt, llama_template=llama_template)
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning)
 
@@ -702,13 +714,6 @@ class TextEncodeSystemPrompt(io.ComfyNode):
                 ),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
                 io.String.Input("system_prompt", multiline=True, dynamic_prompts=True, default=""),
-                io.String.Input(
-                    "thinking_content",
-                    multiline=True,
-                    dynamic_prompts=True,
-                    default="",
-                    tooltip="(Klein only) Custom thinking content to inject. Leave empty for default.",
-                ),
             ],
             outputs=[
                 io.Conditioning.Output(),
@@ -716,22 +721,8 @@ class TextEncodeSystemPrompt(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, model_type, prompt, system_prompt="", thinking_content="") -> io.NodeOutput:
-        if model_type == "klein" and len(thinking_content) > 0:
-            # Klein with custom thinking content
-            if len(system_prompt) > 0:
-                llama_template = (
-                    f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-                    f"<|im_start|>user\n{{}}<|im_end|>\n"
-                    f"<|im_start|>assistant\n<think>\n{thinking_content}\n</think>\n\n"
-                )
-            else:
-                llama_template = (
-                    "<|im_start|>user\n{}<|im_end|>\n"
-                    f"<|im_start|>assistant\n<think>\n{thinking_content}\n</think>\n\n"
-                )
-            tokens = clip.tokenize(prompt, llama_template=llama_template)
-        elif len(system_prompt) > 0:
+    def execute(cls, clip, model_type, prompt, system_prompt="") -> io.NodeOutput:
+        if len(system_prompt) > 0:
             template = SYSTEM_PROMPT_TEMPLATES.get(model_type, SYSTEM_PROMPT_TEMPLATES["flux2dev"])
             llama_template = f"{template['prefix']}{system_prompt}{template['suffix']}"
             tokens = clip.tokenize(prompt, llama_template=llama_template)
