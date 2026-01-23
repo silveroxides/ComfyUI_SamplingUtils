@@ -299,6 +299,57 @@ class SamplingParameters(io.ComfyNode):
             tile_padding,
         )
 
+class AdjustedResolutionParameters(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="AdjustedResolutionParameters",
+            category="utils",
+            inputs=[
+                io.Int.Input(
+                    id="width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16
+                ),
+                io.Int.Input(
+                    id="height", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16
+                ),
+                io.Int.Input(id="batch_size", default=1, min=1, max=4096),
+                io.Float.Input(
+                    id="scale_by",
+                    default=1.0,
+                    min=0.0,
+                    max=10.0,
+                    step=0.01,
+                    tooltip="How much to upscale initial resolution by for the upscaled one.",
+                ),
+                io.Int.Input(
+                    id="multiple",
+                    default=16,
+                    min=4,
+                    max=128,
+                    step=4,
+                    tooltip="Nearest multiple of the result to set the upscaled resolution to.",
+                ),
+            ],
+            outputs=[
+                io.Int.Output(display_name="adjusted_width"),
+                io.Int.Output(display_name="adjusted_height"),
+                io.Int.Output(display_name="upscaled_width"),
+                io.Int.Output(display_name="upscaled_height"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, width: int, height: int, batch_size: int, scale_by: float, multiple: int) -> io.NodeOutput:
+        adjusted_width = round_to_nearest(width, multiple)
+        adjusted_height = round_to_nearest(height, multiple)
+        upscaled_width = round_to_nearest(width * scale_by, multiple)
+        upscaled_height = round_to_nearest(height * scale_by, multiple)
+        return io.NodeOutput(
+            adjusted_width,
+            adjusted_height,
+            upscaled_width,
+            upscaled_height,
+        )
 
 class GetJsonKeyValue(io.ComfyNode):
     @classmethod
@@ -1200,6 +1251,7 @@ class SamplingUtils(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SamplingParameters,
+            AdjustedResolutionParameters,
             GetJsonKeyValue,
             Image_Color_Noise,
             TextEncodeFlux2SystemPrompt,
