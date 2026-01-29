@@ -85,6 +85,78 @@ def pad_text_with_joiners(text: str) -> str:
     return padding_char + joined_text + padding_char
 
 
+def ideographic_joined_crlf(text: str) -> str:
+    """
+    Pad each character in the text with word joiner unicode characters.
+
+    Parameters:
+        text (str): Input string to pad
+
+    Returns:
+        str: String with word joiners between each character and at start/end
+    """
+    if not text:
+        return ""
+
+    ideographic_pad = "\u2060\u3000\u2060"
+    carriage_linefeed = "\u000D\u000A"
+
+    pattern = r"\s"
+    replacement = f"{ideographic_pad}{carriage_linefeed}{ideographic_pad}"
+
+    replaced_text = re.sub(pattern, replacement, text)
+
+    return carriage_linefeed + ideographic_pad + replaced_text + ideographic_pad + carriage_linefeed
+
+
+def ideographic_joined_linepad(text: str) -> str:
+    """
+    Pad each character in the text with word joiner unicode characters.
+
+    Parameters:
+        text (str): Input string to pad
+
+    Returns:
+        str: String with word joiners between each character and at start/end
+    """
+    if not text:
+        return ""
+
+    ideographic_pad = "\u2060\u3000\u2060"
+    carriage_linefeed = "\u000D\u000A"
+
+    pattern = r"^(.*)$"
+    replacement = ideographic_pad + r"\1" + ideographic_pad + carriage_linefeed
+
+    replaced_text = re.sub(pattern, replacement, text)
+
+    return carriage_linefeed + ideographic_pad + replaced_text
+
+
+def ideographic_joined_sentence(text: str) -> str:
+    """
+    Pad each character in the text with word joiner unicode characters.
+
+    Parameters:
+        text (str): Input string to pad
+
+    Returns:
+        str: String with word joiners between each character and at start/end
+    """
+    if not text:
+        return ""
+
+    ideographic_pad = "\u2060\u3000\u2060"
+    carriage_linefeed = "\u000D\u000A"
+
+    pattern = r"([^\w\s,]|\.\s)(\w+.+?\.)"
+    replacement = r"\1" + carriage_linefeed + ideographic_pad + r"\2" + ideographic_pad + carriage_linefeed
+
+    replaced_text = re.sub(pattern, replacement, text)
+
+    return replaced_text
+
+
 def to_bold_fraktur(text: str) -> str:
     """
     Convert all ASCII letters in a string to their Unicode mathematical
@@ -1129,6 +1201,105 @@ class UnFrakturPadNode(io.ComfyNode):
         return io.NodeOutput(result)
 
 
+class IdeographicTagPad(io.ComfyNode):
+    """
+    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="IdeographicTagPad",
+            display_name="IdeographicTagPad (Text Obfuscation)",
+            category="text",
+            inputs=[
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    default="",
+                    placeholder="Enter text to convert...",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="padded_text"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, text: str) -> io.NodeOutput:
+        """
+        Execute the frakturpad conversion.
+        """
+        result = ideographic_joined_crlf(text)
+        return io.NodeOutput(result)
+
+
+class IdeographicLinePad(io.ComfyNode):
+    """
+    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="IdeographicLinePad",
+            display_name="IdeographicLinePad (Text Obfuscation)",
+            category="text",
+            inputs=[
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    default="",
+                    placeholder="Enter text to convert...",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="padded_text"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, text: str) -> io.NodeOutput:
+        """
+        Execute the frakturpad conversion.
+        """
+        result = ideographic_joined_linepad(text)
+        return io.NodeOutput(result)
+
+
+class IdeographicSentencePad(io.ComfyNode):
+    """
+    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="IdeographicSentencePad",
+            display_name="IdeographicSentencePad (Text Obfuscation)",
+            category="text",
+            inputs=[
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    default="",
+                    placeholder="Enter text to convert...",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="padded_text"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, text: str) -> io.NodeOutput:
+        """
+        Execute the frakturpad conversion.
+        """
+        result = ideographic_joined_sentence(text)
+        return io.NodeOutput(result)
+
+
 class SU_LoadImagePath(io.ComfyNode):
     """
     Load an image from an arbitrary file path with proper mask handling.
@@ -1263,6 +1434,9 @@ class SamplingUtils(ComfyExtension):
             SystemMessagePresets,
             FrakturPadNode,
             UnFrakturPadNode,
+            IdeographicTagPad,
+            IdeographicLinePad,
+            IdeographicSentencePad,
             SU_LoadImagePath,
         ]
 
