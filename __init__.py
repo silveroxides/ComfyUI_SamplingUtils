@@ -19,6 +19,7 @@ import node_helpers
 import folder_paths
 from nodes import MAX_RESOLUTION
 from . import system_messages
+from . import instruct_prompts
 
 
 def round_to_nearest(n, m):
@@ -727,6 +728,45 @@ class SystemMessagePresets(io.ComfyNode):
         presets_dict = cls.get_presets()
         system_prompt = presets_dict.get(preset, "")
         return io.NodeOutput(system_prompt)
+
+
+class InstructPromptPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        presets = {}
+        for name in dir(instruct_prompts):
+            if name.startswith("INSTRUCT_PROMPT"):
+                val = getattr(instruct_prompts, name)
+                if isinstance(val, str):
+                    if name.startswith("INSTRUCT_PROMPT_STYLE_"):
+                        presets[name.replace("INSTRUCT_PROMPT_", "")] = val
+                    else:
+                        presets[name] = val
+        return presets
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="InstructPromptPresets",
+            category="advanced/conditioning",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default=sorted(list(presets.keys()))[0] if presets else "",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="instruct_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        instruct_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(instruct_prompt)
 
 
 class TextEncodeFlux2SystemPrompt(io.ComfyNode):
@@ -1500,6 +1540,7 @@ class SamplingUtils(ComfyExtension):
             ModifyMask,
             ImageBlendByMask,
             SystemMessagePresets,
+            InstructPromptPresets,
             FrakturPadNode,
             UnFrakturPadNode,
             IdeographicTagPad,
