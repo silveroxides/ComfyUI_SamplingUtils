@@ -20,6 +20,7 @@ import folder_paths
 from nodes import MAX_RESOLUTION
 from . import system_messages
 from . import instruct_prompts
+from . import bonus_prompts
 
 
 def round_to_nearest(n, m):
@@ -767,6 +768,45 @@ class InstructPromptPresets(io.ComfyNode):
         presets_dict = cls.get_presets()
         instruct_prompt = presets_dict.get(preset, "")
         return io.NodeOutput(instruct_prompt)
+
+
+class BonusPromptPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        presets = {}
+        for name in dir(bonus_prompts):
+            if name.startswith("BONUS_PROMPT"):
+                val = getattr(bonus_prompts, name)
+                if isinstance(val, str):
+                    if name.startswith("BONUS_PROMPT_STYLE_"):
+                        presets[name.replace("BONUS_PROMPT_", "")] = val
+                    else:
+                        presets[name] = val
+        return presets
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="BonusPromptPresets",
+            category="advanced/conditioning",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default=sorted(list(presets.keys()))[0] if presets else "",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="bonus_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        bonus_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(bonus_prompt)
 
 
 class TextEncodeFlux2SystemPrompt(io.ComfyNode):
@@ -1541,6 +1581,7 @@ class SamplingUtils(ComfyExtension):
             ImageBlendByMask,
             SystemMessagePresets,
             InstructPromptPresets,
+            BonusPromptPresets,
             FrakturPadNode,
             UnFrakturPadNode,
             IdeographicTagPad,
