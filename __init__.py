@@ -251,6 +251,31 @@ def unfrakturpad(text: str) -> str:
     text_without_joiners = remove_joiners(text)
     return from_bold_fraktur(text_without_joiners)
 
+class LlamaTokenizerOptions(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="LlTokenizerOptions",
+            category="_for_testing/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.Int.Input("min_padding", default=0, min=0, max=10000, step=1),
+                io.Int.Input("min_length", default=0, min=0, max=10000, step=1),
+            ],
+            outputs=[io.Clip.Output()],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, clip, min_padding, min_length) -> io.NodeOutput:
+        clip = clip.clone()
+        for llama_type in ["qwen3_4b", "qwen3_8b", "qwen25_7b", "mistral3_24b"]:
+            clip.set_tokenizer_option("{}_min_padding".format(llama_type), min_padding)
+            clip.set_tokenizer_option("{}_min_length".format(llama_type), min_length)
+
+        return io.NodeOutput(clip)
+
+
 
 class SamplingParameters(io.ComfyNode):
     @classmethod
@@ -1313,7 +1338,36 @@ class SU_LoadImagePath(io.ComfyNode):
     Load an image from an arbitrary file path with proper mask handling.
     Returns the image and a mask extracted from the alpha channel.
     For images without alpha, returns a full-sized zero mask (not 64x64).
+    Supports both absolute and relative paths, with any OS path separator.
     """
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """
+        Normalize a file path to handle:
+        - Backslashes (Windows) and forward slashes (Unix)
+        - Relative paths (starting with '.', '..', or lowercase letter)
+        - Whitespaces in paths and filenames
+
+        Returns an absolute, normalized path.
+        """
+        if not path:
+            return path
+
+        # Strip leading/trailing whitespace but preserve internal whitespace
+        path = path.strip()
+
+        # Normalize path separators: replace backslashes with forward slashes
+        # Then use os.path.normpath to get the OS-appropriate format
+        path = path.replace('\\', '/')
+        path = os.path.normpath(path)
+
+        # Convert to absolute path if relative
+        # os.path.abspath handles: '.', '..', and paths without drive letter
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+
+        return path
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -1325,8 +1379,8 @@ class SU_LoadImagePath(io.ComfyNode):
                 io.String.Input(
                     "image_path",
                     multiline=False,
-                    placeholder="X://path/to/image.png",
-                    tooltip="Absolute path to the image file to load.",
+                    placeholder="path/to/image.png or X:/path/to/image.png",
+                    tooltip="Path to the image file. Supports absolute or relative paths with any OS format (backslashes or forward slashes). Whitespaces in paths are supported.",
                 ),
             ],
             outputs=[
@@ -1338,11 +1392,14 @@ class SU_LoadImagePath(io.ComfyNode):
 
     @classmethod
     def execute(cls, image_path: str) -> io.NodeOutput:
-        # Validate path
-        if not image_path or not os.path.isfile(image_path):
-            raise ValueError(f"Invalid image path: {image_path}")
+        # Normalize the path to handle relative paths and different separators
+        normalized_path = cls._normalize_path(image_path)
 
-        img = node_helpers.pillow(Image.open, image_path)
+        # Validate path
+        if not normalized_path or not os.path.isfile(normalized_path):
+            raise ValueError(f"Invalid image path: {image_path} (resolved to: {normalized_path})")
+
+        img = node_helpers.pillow(Image.open, normalized_path)
 
         output_images = []
         output_masks = []
@@ -1409,10 +1466,11 @@ class SU_LoadImagePath(io.ComfyNode):
 
     @classmethod
     def IS_CHANGED(cls, image_path: str):
-        if not image_path or not os.path.isfile(image_path):
+        normalized_path = cls._normalize_path(image_path)
+        if not normalized_path or not os.path.isfile(normalized_path):
             return ""
         m = hashlib.sha256()
-        with open(image_path, 'rb') as f:
+        with open(normalized_path, 'rb') as f:
             m.update(f.read())
         return m.digest().hex()
 
@@ -1420,8 +1478,9 @@ class SU_LoadImagePath(io.ComfyNode):
     def VALIDATE_INPUTS(cls, image_path: str):
         if not image_path:
             return "Image path cannot be empty"
-        if not os.path.isfile(image_path):
-            return f"Invalid image file: {image_path}"
+        normalized_path = cls._normalize_path(image_path)
+        if not os.path.isfile(normalized_path):
+            return f"Invalid image file: {image_path} (resolved to: {normalized_path})"
         return True
 
 
@@ -1429,6 +1488,7 @@ class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            LlamaTokenizerOptions,
             SamplingParameters,
             AdjustedResolutionParameters,
             GetJsonKeyValue,
