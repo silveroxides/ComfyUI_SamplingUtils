@@ -18,11 +18,7 @@ import nodes
 import node_helpers
 import folder_paths
 from nodes import MAX_RESOLUTION
-from .system_messages import (
-    SYSTEM_MESSAGE,
-    SYSTEM_MESSAGE_UPSAMPLING_I2I,
-    SYSTEM_MESSAGE_UPSAMPLING_T2I,
-)
+from . import system_messages
 
 
 def round_to_nearest(n, m):
@@ -665,19 +661,35 @@ class Image_Color_Noise(io.ComfyNode):
 
 class SystemMessagePresets(io.ComfyNode):
     @classmethod
+    def get_presets(cls):
+        presets = {}
+        for name in dir(system_messages):
+            if name.startswith("SYSTEM_MESSAGE"):
+                val = getattr(system_messages, name)
+                if isinstance(val, str):
+                    if name == "SYSTEM_MESSAGE":
+                        presets["F2_SYSTEM_MESSAGE"] = val
+                    elif name == "SYSTEM_MESSAGE_UPSAMPLING_I2I":
+                        presets["F2_SYSTEM_MESSAGE_UPSAMPLING_I2I"] = val
+                    elif name == "SYSTEM_MESSAGE_UPSAMPLING_T2I":
+                        presets["F2_SYSTEM_MESSAGE_UPSAMPLING_T2I"] = val
+                    elif name.startswith("SYSTEM_MESSAGE_STYLE_"):
+                        presets[name.replace("SYSTEM_MESSAGE_", "")] = val
+                    else:
+                        presets[name] = val
+        return presets
+
+    @classmethod
     def define_schema(cls):
+        presets = cls.get_presets()
         return io.Schema(
             node_id="SystemMessagePresets",
             category="advanced/conditioning",
             inputs=[
                 io.Combo.Input(
                     "preset",
-                    options=[
-                        "F2_SYSTEM_MESSAGE",
-                        "F2_SYSTEM_MESSAGE_UPSAMPLING_I2I",
-                        "F2_SYSTEM_MESSAGE_UPSAMPLING_T2I",
-                    ],
-                    default="F2_SYSTEM_MESSAGE",
+                    options=sorted(list(presets.keys())),
+                    default="F2_SYSTEM_MESSAGE" if "F2_SYSTEM_MESSAGE" in presets else sorted(list(presets.keys()))[0],
                 ),
             ],
             outputs=[
@@ -687,11 +699,7 @@ class SystemMessagePresets(io.ComfyNode):
 
     @classmethod
     def execute(cls, preset) -> io.NodeOutput:
-        presets_dict = {
-            "F2_SYSTEM_MESSAGE": SYSTEM_MESSAGE,
-            "F2_SYSTEM_MESSAGE_UPSAMPLING_I2I": SYSTEM_MESSAGE_UPSAMPLING_I2I,
-            "F2_SYSTEM_MESSAGE_UPSAMPLING_T2I": SYSTEM_MESSAGE_UPSAMPLING_T2I,
-        }
+        presets_dict = cls.get_presets()
         system_prompt = presets_dict.get(preset, "")
         return io.NodeOutput(system_prompt)
 
@@ -763,7 +771,7 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
                 "<|im_start|>user\n{}<|im_end|>\n"
                 "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
             )
-        
+
         tokens = clip.tokenize(prompt, llama_template=llama_template)
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning)
