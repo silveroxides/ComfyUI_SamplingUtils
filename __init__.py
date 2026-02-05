@@ -1564,6 +1564,172 @@ class SU_LoadImagePath(io.ComfyNode):
         return True
 
 
+class SU_LoadImageDirectory(io.ComfyNode):
+    """
+    Load multiple images from a directory as a batch.
+    Supports selecting a range of images using start index and count.
+    Images are sorted alphanumerically.
+    """
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        if not path:
+            return path
+        path = path.strip()
+        path = path.replace('\\', '/')
+        path = os.path.normpath(path)
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+        return path
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="SU_LoadImageDirectory",
+            display_name="Load Images (Directory)",
+            category="image",
+            inputs=[
+                io.String.Input(
+                    "directory_path",
+                    multiline=False,
+                    placeholder="path/to/directory",
+                    tooltip="Path to the directory containing images.",
+                ),
+                io.Int.Input(
+                    "start_index",
+                    default=0,
+                    min=0,
+                    step=1,
+                    tooltip="Index of the first image to load (sorted alphabetically)."
+                ),
+                io.Int.Input(
+                    "load_count",
+                    default=1,
+                    min=1,
+                    max=1024,
+                    step=1,
+                    tooltip="Number of images to load."
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="IMAGE"),
+                io.Mask.Output(display_name="MASK"),
+                io.Mask.Output(display_name="MASK_INVERTED"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, directory_path: str, start_index: int, load_count: int) -> io.NodeOutput:
+        normalized_path = cls._normalize_path(directory_path)
+
+        if not normalized_path or not os.path.isdir(normalized_path):
+            raise ValueError(f"Invalid directory path: {directory_path}")
+
+        # Get valid image files
+        valid_extensions = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.gif', '.mpo'}
+        files = []
+        for f in os.listdir(normalized_path):
+            ext = os.path.splitext(f)[1].lower()
+            if ext in valid_extensions:
+                files.append(os.path.join(normalized_path, f))
+        
+        files.sort()
+        
+        # Apply slice
+        end_index = start_index + load_count
+        selected_files = files[start_index:end_index]
+
+        if not selected_files:
+             raise ValueError(f"No images found in range [{start_index}:{end_index}] in directory: {directory_path}")
+
+        output_images = []
+        output_masks = []
+        w, h = None, None
+
+        for file_path in selected_files:
+            try:
+                img = node_helpers.pillow(Image.open, file_path)
+            except Exception as e:
+                print(f"Warning: Could not load image {file_path}: {e}")
+                continue
+
+            # Process just the first frame
+            i = node_helpers.pillow(ImageOps.exif_transpose, img)
+            
+            if i.mode == 'I':
+                i = i.point(lambda x: x * (1 / 65535))
+            
+            image = i.convert("RGB")
+            
+            if w is None:
+                w = image.size[0]
+                h = image.size[1]
+            
+            if image.size[0] != w or image.size[1] != h:
+                print(f"Warning: Skipping {file_path} due to dimension mismatch. Expected {w}x{h}, got {image.size}")
+                continue
+                
+            image_np = np.array(image).astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_np)[None,]
+            
+            if 'A' in i.getbands():
+                mask_np = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+                mask = 1.0 - torch.from_numpy(mask_np)
+            elif i.mode == 'P' and 'transparency' in i.info:
+                rgba = i.convert('RGBA')
+                mask_np = np.array(rgba.getchannel('A')).astype(np.float32) / 255.0
+                mask = 1.0 - torch.from_numpy(mask_np)
+            else:
+                mask = torch.zeros((h, w), dtype=torch.float32, device="cpu")
+                
+            output_images.append(image_tensor)
+            output_masks.append(mask.unsqueeze(0))
+
+        if not output_images:
+            raise ValueError("No valid images loaded (checked dimensions and validity).")
+            
+        if len(output_images) > 1:
+            output_image = torch.cat(output_images, dim=0)
+            output_mask = torch.cat(output_masks, dim=0)
+        else:
+            output_image = output_images[0]
+            output_mask = output_masks[0]
+            
+        output_mask_inverted = 1.0 - output_mask
+        
+        return io.NodeOutput(output_image, output_mask, output_mask_inverted)
+
+    @classmethod
+    def IS_CHANGED(cls, directory_path: str, start_index: int, load_count: int):
+        normalized_path = cls._normalize_path(directory_path)
+        if not normalized_path or not os.path.isdir(normalized_path):
+            return ""
+            
+        valid_extensions = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.gif', '.mpo'}
+        files = []
+        try:
+            for f in os.listdir(normalized_path):
+                ext = os.path.splitext(f)[1].lower()
+                if ext in valid_extensions:
+                    files.append(os.path.join(normalized_path, f))
+        except Exception:
+            return float("NaN")
+            
+        files.sort()
+        end_index = start_index + load_count
+        selected_files = files[start_index:end_index]
+        
+        m = hashlib.sha256()
+        for p in selected_files:
+            try:
+                # Hash filename and mtime
+                m.update(p.encode('utf-8'))
+                m.update(str(os.path.getmtime(p)).encode('utf-8'))
+            except Exception:
+                pass
+        return m.digest().hex()
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -1588,6 +1754,7 @@ class SamplingUtils(ComfyExtension):
             IdeographicLinePad,
             IdeographicSentencePad,
             SU_LoadImagePath,
+            SU_LoadImageDirectory,
         ]
 
 
