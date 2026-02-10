@@ -1314,6 +1314,39 @@ class UnFrakturPadNode(io.ComfyNode):
         return io.NodeOutput(result)
 
 
+class JoinerPadding(io.ComfyNode):
+    """
+    ComfyUI node that pads text with word joiner characters.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="JoinerPadding",
+            display_name="Joiner Padding",
+            category="text",
+            inputs=[
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    default="",
+                    placeholder="Enter text to pad...",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="padded_text"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, text: str) -> io.NodeOutput:
+        """
+        Execute the joiner padding.
+        """
+        result = pad_text_with_joiners(text)
+        return io.NodeOutput(result)
+
+
 class IdeographicTagPad(io.ComfyNode):
     """
     ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
@@ -1750,6 +1783,7 @@ class SamplingUtils(ComfyExtension):
             BonusPromptPresets,
             FrakturPadNode,
             UnFrakturPadNode,
+            JoinerPadding,
             IdeographicTagPad,
             IdeographicLinePad,
             IdeographicSentencePad,
