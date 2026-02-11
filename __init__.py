@@ -12,6 +12,7 @@ import hashlib
 import pilgram
 from tqdm import tqdm
 from typing_extensions import override
+from comfy_extras import SwitchNode, SoftSwitchNode
 from comfy_api.latest import ComfyExtension, io
 from comfy import model_management
 import nodes
@@ -1762,6 +1763,44 @@ class SU_LoadImageDirectory(io.ComfyNode):
                 pass
         return m.digest().hex()
 
+class SwitchInverseNode(SwitchNode):
+    @classmethod
+    def define_schema(cls):
+        template = io.MatchType.Template("switch")
+        return io.Schema(
+            node_id="ComfySwitchInverseNode",
+            display_name="Switch (Inverse)",
+            category="logic",
+            is_experimental=True,
+            inputs=[
+                io.Boolean.Input("switch"),
+                io.MatchType.Input("on_true", template=template, lazy=True),
+                io.MatchType.Input("on_false", template=template, lazy=True),
+            ],
+            outputs=[
+                io.MatchType.Output(template=template, display_name="output"),
+            ],
+        )
+
+
+class SoftSwitchInverseNode(SoftSwitchNode):
+    @classmethod
+    def define_schema(cls):
+        template = io.MatchType.Template("switch")
+        return io.Schema(
+            node_id="ComfySoftSwitchInverseNode",
+            display_name="Soft Switch (Inverse)",
+            category="logic",
+            is_experimental=True,
+            inputs=[
+                io.Boolean.Input("switch"),
+                io.MatchType.Input("on_true", template=template, lazy=True, optional=True),
+                io.MatchType.Input("on_false", template=template, lazy=True, optional=True),
+            ],
+            outputs=[
+                io.MatchType.Output(template=template, display_name="output"),
+            ],
+        )
 
 class SamplingUtils(ComfyExtension):
     @override
@@ -1789,6 +1828,8 @@ class SamplingUtils(ComfyExtension):
             IdeographicSentencePad,
             SU_LoadImagePath,
             SU_LoadImageDirectory,
+            SwitchInverseNode,
+            SoftSwitchInverseNode,
         ]
 
 
