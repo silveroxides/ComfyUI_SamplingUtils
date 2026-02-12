@@ -12,7 +12,7 @@ import hashlib
 import pilgram
 from tqdm import tqdm
 from typing_extensions import override
-from comfy_extras import SwitchNode, SoftSwitchNode
+from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
 from comfy_api.latest import ComfyExtension, io
 from comfy import model_management
 import nodes
