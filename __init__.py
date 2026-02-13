@@ -810,6 +810,51 @@ class BonusPromptPresets(io.ComfyNode):
         return io.NodeOutput(bonus_prompt)
 
 
+class UnifiedPresets(io.ComfyNode):
+    """
+    Primitive node that unifies shared presets between SystemMessagePresets,
+    InstructPromptPresets, and BonusPromptPresets.
+    Outputs selected preset as 'any' type for flexible downstream usage.
+    """
+    
+    @classmethod
+    def get_shared_presets(cls):
+        """Get presets that are shared between all three preset sources"""
+        system_presets = set(SystemMessagePresets.get_presets().keys())
+        instruct_presets = set(InstructPromptPresets.get_presets().keys())
+        bonus_presets = set(BonusPromptPresets.get_presets().keys())
+        
+        # Find intersection of all three
+        shared = system_presets & instruct_presets & bonus_presets
+        return sorted(list(shared))
+    
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        shared_presets = cls.get_shared_presets()
+        default_preset = shared_presets[0] if shared_presets else ""
+        
+        return io.Schema(
+            node_id="UnifiedPresets",
+            display_name="Unified Presets (Primitive)",
+            category="primitives",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=shared_presets,
+                    default=default_preset,
+                ),
+            ],
+            outputs=[
+                io.AnyType.Output(display_name="preset"),
+            ],
+        )
+    
+    @classmethod
+    def execute(cls, preset: str) -> io.NodeOutput:
+        """Forward the selected preset as 'any' type"""
+        return io.NodeOutput(preset)
+
+
 class TextEncodeFlux2SystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1820,6 +1865,7 @@ class SamplingUtils(ComfyExtension):
             SystemMessagePresets,
             InstructPromptPresets,
             BonusPromptPresets,
+            UnifiedPresets,
             FrakturPadNode,
             UnFrakturPadNode,
             JoinerPadding,
