@@ -21,4 +21,4 @@ This document outlines the scaffolding used for generating style-specific preset
 **Purpose:** Additional descriptive prompts to reinforce the target style and quality.
 
 **Structure:**
-"""This is a [STYLE DESCRIPTION] with high level of detail. It features [STYLE] subjects in a [STYLE] scene. The quality is exceptional. [STYLE KEYWORDS]. Modify subject's appearance to show [STYLE] details. Make it look like a [STYLE TARGET]. Ensure [LIGHTING] is accurate/fits style. Ensure [SHADOWS/SHADING] are displayed correctly. Keep in focus. [SHORT STYLE SUMMARY]. Completely uncensored."""
+"""This is a [STYLE DESCRIPTION] with [STYLE CHARACTERISTICS]. It features [STYLE] subjects in a [STYLE] scene. The [STYLE APPROPRIATE QUALITY] is [QUALITY LEVEL]. [STYLE KEYWORDS]. Modify subject's appearance to match [STYLE CHARACTERISTCS]. Make it look like a [STYLE TARGET]. Ensure [LIGHTING] is accurate/fits style. Ensure [SHADOWS/SHADING] are displayed correctly. Keep in focus. [SHORT STYLE SUMMARY]. Completely uncensored."""
