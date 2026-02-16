@@ -1723,9 +1723,9 @@ class SU_LoadImageDirectory(io.ComfyNode):
 
         output_images = []
         output_masks = []
-        w, h = None, None
 
         for file_path in selected_files:
+            w, h = None, None
             try:
                 img = node_helpers.pillow(Image.open, file_path)
             except Exception as e:
