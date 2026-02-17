@@ -816,23 +816,23 @@ class UnifiedPresets(io.ComfyNode):
     InstructPromptPresets, and BonusPromptPresets.
     Outputs selected preset as 'any' type for flexible downstream usage.
     """
-    
+
     @classmethod
     def get_shared_presets(cls):
         """Get presets that are shared between all three preset sources"""
         system_presets = set(SystemMessagePresets.get_presets().keys())
         instruct_presets = set(InstructPromptPresets.get_presets().keys())
         bonus_presets = set(BonusPromptPresets.get_presets().keys())
-        
+
         # Find intersection of all three
         shared = system_presets & instruct_presets & bonus_presets
         return sorted(list(shared))
-    
+
     @classmethod
     def define_schema(cls) -> io.Schema:
         shared_presets = cls.get_shared_presets()
         default_preset = shared_presets[0] if shared_presets else ""
-        
+
         return io.Schema(
             node_id="UnifiedPresets",
             display_name="Unified Presets (Primitive)",
@@ -848,7 +848,7 @@ class UnifiedPresets(io.ComfyNode):
                 io.AnyType.Output(display_name="preset"),
             ],
         )
-    
+
     @classmethod
     def execute(cls, preset: str) -> io.NodeOutput:
         """Forward the selected preset as 'any' type"""
@@ -1543,9 +1543,9 @@ class SU_LoadImagePath(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Image.Output(display_name="IMAGE"),
-                io.Mask.Output(display_name="MASK"),
-                io.Mask.Output(display_name="MASK_INVERTED"),
+                io.Image.Output(display_name="IMAGE", is_output_list=True),
+                io.Mask.Output(display_name="MASK", is_output_list=True),
+                io.Mask.Output(display_name="MASK_INVERTED", is_output_list=True),
             ],
         )
 
@@ -1691,9 +1691,9 @@ class SU_LoadImageDirectory(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Image.Output(display_name="IMAGE"),
-                io.Mask.Output(display_name="MASK"),
-                io.Mask.Output(display_name="MASK_INVERTED"),
+                io.Image.Output(display_name="IMAGE", is_output_list=True),
+                io.Mask.Output(display_name="MASK", is_output_list=True),
+                io.Mask.Output(display_name="MASK_INVERTED", is_output_list=True),
             ],
         )
 
@@ -1711,9 +1711,9 @@ class SU_LoadImageDirectory(io.ComfyNode):
             ext = os.path.splitext(f)[1].lower()
             if ext in valid_extensions:
                 files.append(os.path.join(normalized_path, f))
-        
+
         files.sort()
-        
+
         # Apply slice
         end_index = start_index + load_count
         selected_files = files[start_index:end_index]
@@ -1723,6 +1723,7 @@ class SU_LoadImageDirectory(io.ComfyNode):
 
         output_images = []
         output_masks = []
+        output_masks_inverted = []
 
         for file_path in selected_files:
             w, h = None, None
@@ -1734,56 +1735,53 @@ class SU_LoadImageDirectory(io.ComfyNode):
 
             # Process just the first frame
             i = node_helpers.pillow(ImageOps.exif_transpose, img)
-            
+
             if i.mode == 'I':
                 i = i.point(lambda x: x * (1 / 65535))
-            
+
             image = i.convert("RGB")
-            
+
             if w is None:
                 w = image.size[0]
                 h = image.size[1]
-            
+
             if image.size[0] != w or image.size[1] != h:
                 print(f"Warning: Skipping {file_path} due to dimension mismatch. Expected {w}x{h}, got {image.size}")
                 continue
-                
+
             image_np = np.array(image).astype(np.float32) / 255.0
             image_tensor = torch.from_numpy(image_np)[None,]
-            
+
             if 'A' in i.getbands():
                 mask_np = np.array(i.getchannel('A')).astype(np.float32) / 255.0
                 mask = 1.0 - torch.from_numpy(mask_np)
+                mask_inverted = 1.0 - mask
             elif i.mode == 'P' and 'transparency' in i.info:
                 rgba = i.convert('RGBA')
                 mask_np = np.array(rgba.getchannel('A')).astype(np.float32) / 255.0
                 mask = 1.0 - torch.from_numpy(mask_np)
+                mask_inverted = 1.0 - mask
             else:
                 mask = torch.zeros((h, w), dtype=torch.float32, device="cpu")
-                
+                mask_inverted = 1.0 - mask
+
+
             output_images.append(image_tensor)
             output_masks.append(mask.unsqueeze(0))
+            output_masks_inverted.append(mask_inverted.unsqueeze(0))
 
         if not output_images:
             raise ValueError("No valid images loaded (checked dimensions and validity).")
-            
-        if len(output_images) > 1:
-            output_image = torch.cat(output_images, dim=0)
-            output_mask = torch.cat(output_masks, dim=0)
-        else:
-            output_image = output_images[0]
-            output_mask = output_masks[0]
-            
-        output_mask_inverted = 1.0 - output_mask
-        
-        return io.NodeOutput(output_image, output_mask, output_mask_inverted)
+
+
+        return io.NodeOutput(output_images, output_masks, output_masks_inverted)
 
     @classmethod
     def IS_CHANGED(cls, directory_path: str, start_index: int, load_count: int):
         normalized_path = cls._normalize_path(directory_path)
         if not normalized_path or not os.path.isdir(normalized_path):
             return ""
-            
+
         valid_extensions = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.gif', '.mpo'}
         files = []
         try:
@@ -1793,11 +1791,11 @@ class SU_LoadImageDirectory(io.ComfyNode):
                     files.append(os.path.join(normalized_path, f))
         except Exception:
             return float("NaN")
-            
+
         files.sort()
         end_index = start_index + load_count
         selected_files = files[start_index:end_index]
-        
+
         m = hashlib.sha256()
         for p in selected_files:
             try:
