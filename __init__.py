@@ -1057,6 +1057,8 @@ class ModifyMask(io.ComfyNode):
                     "decay_factor", default=1.0, max=1.0, min=0.0, step=0.01
                 ),
                 io.Boolean.Input("fill_holes", default=False, optional=True),
+                io.Float.Input("lower_clamp", default=0.0, max=100.0, min=0.0, step=0.1),
+                io.Float.Input("upper_clamp", default=100.0, max=100.0, min=0.0, step=0.1),
             ],
             outputs=[
                 io.Mask.Output(display_name="mask"),
@@ -1076,6 +1078,8 @@ class ModifyMask(io.ComfyNode):
         lerp_alpha,
         decay_factor,
         fill_holes=False,
+        lower_clamp=0.0,
+        upper_clamp=100.0,
     ):
         import kornia.morphology as morph
 
@@ -1168,6 +1172,10 @@ class ModifyMask(io.ComfyNode):
                 out[idx] = blurred_tensor
 
             blurred = torch.cat(out, dim=0)
+            if lower_clamp > 0.0:
+                blurred = torch.max(blurred, torch.tensor(lower_clamp / 100.0, device=blurred.device))
+            if upper_clamp < 100.0:
+                blurred = torch.min(blurred, torch.tensor(upper_clamp / 100.0, device=blurred.device))
             mask = blurred
             mask_inverted = 1.0 - blurred
             return io.NodeOutput(mask, mask_inverted)
@@ -1181,12 +1189,20 @@ class ModifyMask(io.ComfyNode):
                 # Convert back to tensor
                 out[idx] = pil2tensor(pil_image)
             blurred = torch.cat(out, dim=0)
+            if lower_clamp > 0.0:
+                blurred = torch.max(blurred, torch.tensor(lower_clamp / 100.0, device=blurred.device))
+            if upper_clamp < 100.0:
+                blurred = torch.min(blurred, torch.tensor(upper_clamp / 100.0, device=blurred.device))
             mask = blurred
             mask_inverted = 1.0 - blurred
             return io.NodeOutput(mask, mask_inverted)
         else:
             mask = torch.stack(out, dim=0)
-            mask_inverted = 1.0 - torch.stack(out, dim=0)
+            if lower_clamp > 0.0:
+                mask = torch.max(mask, torch.tensor(lower_clamp / 100.0, device=mask.device))
+            if upper_clamp < 100.0:
+                mask = torch.min(mask, torch.tensor(upper_clamp / 100.0, device=mask.device))
+            mask_inverted = 1.0 - mask
             return io.NodeOutput(mask, mask_inverted)
 
 

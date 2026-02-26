@@ -1,4 +1,6 @@
-# Franchise Style Implementation Standards
+# Style Implementation Standards for Image-to-Image Editing
+
+> **Note:** The standards and templates in this document are designed for **Image-to-Image (I2I)** editing tasks. The primary goal is to transform an existing image to a new style while preserving the original composition and subject identity.
 
 This document outlines the authoritative standards for implementing franchise-specific style presets within the `ComfyUI_SamplingUtils` project. It ensures that any new style additions leverage the specific model training associated with a franchise while maintaining composition and natural language framing.
 
@@ -18,6 +20,8 @@ All franchise-based styles must rigorously follow this specific naming and descr
 Every franchise reference must be immediately followed by a comma and a "featuring" clause. This clause must contain concrete, objective visual descriptors (such as line thickness, shading types, or specific rendering effects) that define the fundamental art style. This grounds the reference in visual data and prevents the AI from simply inserting iconic characters into the scene.
 
 ---
+
+> The templates below provide a structured starting point and are particularly useful for franchise-based styles. However, they should be treated as **approximate guidelines rather than absolute rules**. For styles that are material-based (e.g., "Claymation") or concept-based (e.g., "Inflated"), these templates can and should be adapted to use more natural and descriptive language appropriate for that specific transformation.
 
 ## 2. File-Specific Implementation Templates
 
