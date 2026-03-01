@@ -960,6 +960,36 @@ class TextEncodeZITSystemPrompt(io.ComfyNode):
         return io.NodeOutput(conditioning)
 
 
+class TextEncodeZImageThinkPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeZImageThinkPrompt",
+            category="advanced/conditioning",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("thinking", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, thinking=None) -> io.NodeOutput:
+        if len(thinking) > 0:
+            template_prefix = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            template_suffix = "\n</think>\n\n"
+            llama_template = f"{template_prefix}{thinking}{template_suffix}"
+            tokens = clip.tokenize(prompt, llama_template=llama_template)
+        else:
+            tokens = clip.tokenize(prompt)
+
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        return io.NodeOutput(conditioning)
+
+
 # Template definitions for unified node
 SYSTEM_PROMPT_TEMPLATES = {
     "flux2dev": {
@@ -1873,6 +1903,7 @@ class SamplingUtils(ComfyExtension):
             TextEncodeFlux2SystemPrompt,
             TextEncodeKleinSystemPrompt,
             TextEncodeZITSystemPrompt,
+            TextEncodeZImageThinkPrompt,
             TextEncodeSystemPrompt,
             ModifyMask,
             ImageBlendByMask,
