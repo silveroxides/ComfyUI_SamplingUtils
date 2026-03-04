@@ -1589,9 +1589,9 @@ class SU_LoadImagePath(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Image.Output(display_name="IMAGE", is_output_list=True),
-                io.Mask.Output(display_name="MASK", is_output_list=True),
-                io.Mask.Output(display_name="MASK_INVERTED", is_output_list=True),
+                io.Image.Output(display_name="IMAGE"),
+                io.Mask.Output(display_name="MASK"),
+                io.Mask.Output(display_name="MASK_INVERTED"),
             ],
         )
 
@@ -1891,6 +1891,29 @@ class SoftSwitchInverseNode(SoftSwitchNode):
             ],
         )
 
+class IntegerRangeRandom(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="IntegerRangeRandom",
+            display_name="Random Integer in Range",
+            category="utils/primitive",
+            inputs=[
+                io.Int.Input("minimum", min=-sys.maxsize, max=sys.maxsize),
+                io.Int.Input("maximum", min=-sys.maxsize, max=sys.maxsize),
+                io.Int.Input("seed", min=-sys.maxsize, max=sys.maxsize, control_after_generate=True),
+            ],
+            outputs=[io.Int.Output(display_name="random_integer")],
+        )
+
+    @classmethod
+    def execute(cls, minimum: int, maximum: int, seed: int = 0) -> io.NodeOutput:
+        min_val = min(minimum, maximum)
+        max_val = max(minimum, maximum)
+        rng = random.Random(seed)
+        return io.NodeOutput(rng.randint(min_val, max_val))
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -1921,6 +1944,7 @@ class SamplingUtils(ComfyExtension):
             SU_LoadImageDirectory,
             SwitchInverseNode,
             SoftSwitchInverseNode,
+            IntegerRangeRandom,
         ]
 
 
