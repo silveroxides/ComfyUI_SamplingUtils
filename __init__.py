@@ -341,6 +341,81 @@ def _auto_occlusion_threshold(flow_fwd: np.ndarray, flow_bwd: np.ndarray) -> flo
     threshold = p95 + max((p95 - p85) * 0.5, 0.5)
     return float(np.clip(threshold, 1.0, 15.0))
 
+def _match_image_properties(
+    original_tensor: torch.Tensor,
+    generated_tensor: torch.Tensor,
+    overall_weight: float,
+    color_weight: float,
+    saturation_weight: float,
+    lighting_weight: float,
+) -> torch.Tensor:
+    # We will do color and lighting transfer in LAB space.
+    # Saturation transfer will be handled via blending in HSV space if needed, 
+    # but LAB a/b channels inherently affect colorfulness. We can just use HSV
+    # for saturation strictly.
+    
+    batch_size = generated_tensor.size(0)
+    out_tensors = []
+    
+    orig_batch = original_tensor.size(0)
+    
+    for i in range(batch_size):
+        orig_i = i if i < orig_batch else 0
+        
+        orig_np = np.clip(255.0 * original_tensor[orig_i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+        gen_np = np.clip(255.0 * generated_tensor[i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+        
+        # LAB for Color & Lighting
+        orig_lab = cv2.cvtColor(orig_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        gen_lab = cv2.cvtColor(gen_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        
+        # Means and Std Devs for LAB
+        orig_l_mean, orig_l_std = orig_lab[:, :, 0].mean(), orig_lab[:, :, 0].std()
+        orig_a_mean, orig_a_std = orig_lab[:, :, 1].mean(), orig_lab[:, :, 1].std()
+        orig_b_mean, orig_b_std = orig_lab[:, :, 2].mean(), orig_lab[:, :, 2].std()
+        
+        gen_l_mean, gen_l_std = gen_lab[:, :, 0].mean(), gen_lab[:, :, 0].std()
+        gen_a_mean, gen_a_std = gen_lab[:, :, 1].mean(), gen_lab[:, :, 1].std()
+        gen_b_mean, gen_b_std = gen_lab[:, :, 2].mean(), gen_lab[:, :, 2].std()
+        
+        out_lab = np.copy(gen_lab)
+        
+        # Calculate full transfer
+        l_trans = (gen_lab[:, :, 0] - gen_l_mean) * (orig_l_std / (gen_l_std + 1e-5)) + orig_l_mean
+        a_trans = (gen_lab[:, :, 1] - gen_a_mean) * (orig_a_std / (gen_a_std + 1e-5)) + orig_a_mean
+        b_trans = (gen_lab[:, :, 2] - gen_b_mean) * (orig_b_std / (gen_b_std + 1e-5)) + orig_b_mean
+        
+        # Blend based on weights
+        l_weight = lighting_weight * overall_weight
+        c_weight = color_weight * overall_weight
+        
+        out_lab[:, :, 0] = gen_lab[:, :, 0] * (1.0 - l_weight) + l_trans * l_weight
+        out_lab[:, :, 1] = gen_lab[:, :, 1] * (1.0 - c_weight) + a_trans * c_weight
+        out_lab[:, :, 2] = gen_lab[:, :, 2] * (1.0 - c_weight) + b_trans * c_weight
+        
+        out_lab = np.clip(out_lab, 0, 255).astype(np.uint8)
+        res_rgb = cv2.cvtColor(out_lab, cv2.COLOR_LAB2RGB)
+        
+        # Now handle Saturation in HSV space
+        if saturation_weight > 0.0:
+            res_hsv = cv2.cvtColor(res_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+            orig_hsv = cv2.cvtColor(orig_np, cv2.COLOR_RGB2HSV).astype(np.float32)
+            
+            orig_s_mean = orig_hsv[:, :, 1].mean()
+            gen_s_mean = res_hsv[:, :, 1].mean()
+            
+            sat_ratio = (orig_s_mean + 1e-5) / (gen_s_mean + 1e-5)
+            s_weight = saturation_weight * overall_weight
+            
+            effective_sat_ratio = 1.0 + (sat_ratio - 1.0) * s_weight
+            res_hsv[:, :, 1] = np.clip(res_hsv[:, :, 1] * effective_sat_ratio, 0, 255)
+            res_rgb = cv2.cvtColor(res_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
+            
+        out_tensor = torch.from_numpy(res_rgb.astype(np.float32) / 255.0).unsqueeze(0)
+        out_tensors.append(out_tensor)
+        
+    return torch.cat(out_tensors, dim=0)
+
 def _composite(original_np: np.ndarray,
                generated_np: np.ndarray,
                delta_e_threshold: float,
@@ -2128,6 +2203,47 @@ FLOW_PRESETS = {
 }
 
 
+class ImageMatchPropertiesNode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="ImageMatchProperties",
+            display_name="Image Match Properties",
+            category="image",
+            inputs=[
+                io.Image.Input("original_image"),
+                io.Image.Input("generated_image"),
+                io.Float.Input("overall_weight", default=1.0, min=0.0, max=10.0, step=0.01),
+                io.Float.Input("color_weight", default=1.0, min=0.0, max=10.0, step=0.01),
+                io.Float.Input("saturation_weight", default=1.0, min=0.0, max=10.0, step=0.01),
+                io.Float.Input("lighting_weight", default=1.0, min=0.0, max=10.0, step=0.01),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        original_image: torch.Tensor,
+        generated_image: torch.Tensor,
+        overall_weight: float,
+        color_weight: float,
+        saturation_weight: float,
+        lighting_weight: float,
+    ) -> io.NodeOutput:
+        result = _match_image_properties(
+            original_image,
+            generated_image,
+            overall_weight,
+            color_weight,
+            saturation_weight,
+            lighting_weight,
+        )
+        return io.NodeOutput(result)
+
+
 class OpticalFlowComposite(io.ComfyNode):
     """
     Composites a Klein edit onto the original image.
@@ -2437,6 +2553,7 @@ class SamplingUtils(ComfyExtension):
             SwitchInverseNode,
             SoftSwitchInverseNode,
             IntegerRangeRandom,
+            ImageMatchPropertiesNode,
             OpticalFlowComposite,
             TextOverlayNode,
         ]
