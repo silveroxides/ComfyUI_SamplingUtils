@@ -1,3 +1,4 @@
 kornia
 scipy
 pilgram
+opencv-python

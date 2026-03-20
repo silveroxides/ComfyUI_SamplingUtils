@@ -10,6 +10,8 @@ import numpy as np
 import scipy
 import hashlib
 import pilgram
+import cv2
+import math
 from tqdm import tqdm
 from typing_extensions import override
 from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
@@ -253,6 +255,211 @@ def unfrakturpad(text: str) -> str:
     """
     text_without_joiners = remove_joiners(text)
     return from_bold_fraktur(text_without_joiners)
+
+def _hex_to_rgb(hex_str: str, default=(255, 255, 255)):
+    hex_str = hex_str.lstrip('#')
+    try:
+        if len(hex_str) == 6:
+            return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+        elif len(hex_str) == 8:
+            return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4, 6))
+    except ValueError:
+        pass
+    return default
+
+def _diag(H: int, W: int) -> float:
+    return math.sqrt(H * H + W * W)
+
+def _pct_to_px(pct: float, diag: float) -> int:
+    return max(0, round(abs(pct) * diag / 100.0))
+
+def _blur_kernel_for_diag(diag: float) -> tuple:
+    k = max(3, int(round(diag / 724.0 * 3)))
+    if k % 2 == 0: k += 1
+    return (k, k)
+
+def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
+    lin = np.where(rgb <= 0.04045,
+                   rgb / 12.92,
+                   ((rgb + 0.055) / 1.055) ** 2.4)
+    M = np.array([[0.4124564, 0.3575761, 0.1804375],[0.2126729, 0.7151522, 0.0721750],[0.0193339, 0.1191920, 0.9503041],
+    ], dtype=np.float32)
+    xyz = lin @ M.T / np.array([0.95047, 1.00000, 1.08883], dtype=np.float32)
+
+    def f(t):
+        return np.where(t > (6/29)**3,
+                        t ** (1/3),
+                        t / (3 * (6/29)**2) + 4/29)
+
+    fx, fy, fz = f(xyz[..., 0]), f(xyz[..., 1]), f(xyz[..., 2])
+    return np.stack([116*fy - 16, 500*(fx - fy), 200*(fy - fz)], axis=-1).astype(np.float32)
+
+def _dis_flow(gray_a: np.ndarray, gray_b: np.ndarray, preset: int) -> np.ndarray:
+    return cv2.DISOpticalFlow_create(preset).calc(gray_a, gray_b, None)
+
+def _warp(image: np.ndarray, flow: np.ndarray) -> np.ndarray:
+    H, W = flow.shape[:2]
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    map_x = (xx + flow[..., 0]).astype(np.float32)
+    map_y = (yy + flow[..., 1]).astype(np.float32)
+    return cv2.remap(image, map_x, map_y, cv2.INTER_LINEAR, cv2.BORDER_REFLECT)
+
+def _occlusion_mask(flow_fwd: np.ndarray, flow_bwd: np.ndarray, threshold: float) -> np.ndarray:
+    H, W = flow_fwd.shape[:2]
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    bwd_x = cv2.remap(flow_bwd[..., 0], xx + flow_fwd[..., 0], yy + flow_fwd[..., 1],
+                      cv2.INTER_LINEAR, cv2.BORDER_CONSTANT, 0)
+    bwd_y = cv2.remap(flow_bwd[..., 1], xx + flow_fwd[..., 0], yy + flow_fwd[..., 1],
+                      cv2.INTER_LINEAR, cv2.BORDER_CONSTANT, 0)
+    err = np.sqrt((flow_fwd[..., 0] + bwd_x)**2 + (flow_fwd[..., 1] + bwd_y)**2)
+    return (err > threshold).astype(np.float32)
+
+def _grow_mask(mask: np.ndarray, grow_px: int) -> np.ndarray:
+    if grow_px == 0: return mask
+    radius = abs(grow_px)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+    op = cv2.MORPH_DILATE if grow_px > 0 else cv2.MORPH_ERODE
+    return cv2.morphologyEx(mask.astype(np.uint8), op, k).astype(np.float32)
+
+def _auto_delta_e_threshold(delta_e: np.ndarray) -> float:
+    p75 = float(np.percentile(delta_e, 75))
+    p90 = float(np.percentile(delta_e, 90))
+    spread = p90 - p75
+    threshold = p75 + max(spread * 0.4, 3.0) if spread > 5.0 else p75 + max(spread * 0.6, 4.0)
+    return float(np.clip(threshold, 4.0, 60.0))
+
+def _auto_occlusion_threshold(flow_fwd: np.ndarray, flow_bwd: np.ndarray) -> float:
+    H, W = flow_fwd.shape[:2]
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    bwd_x = cv2.remap(flow_bwd[..., 0], xx + flow_fwd[..., 0], yy + flow_fwd[..., 1],
+                      cv2.INTER_LINEAR, cv2.BORDER_CONSTANT, 0)
+    bwd_y = cv2.remap(flow_bwd[..., 1], xx + flow_fwd[..., 0], yy + flow_fwd[..., 1],
+                      cv2.INTER_LINEAR, cv2.BORDER_CONSTANT, 0)
+    err = np.sqrt((flow_fwd[..., 0] + bwd_x)**2 + (flow_fwd[..., 1] + bwd_y)**2)
+    p85 = float(np.percentile(err, 85))
+    p95 = float(np.percentile(err, 95))
+    threshold = p95 + max((p95 - p85) * 0.5, 0.5)
+    return float(np.clip(threshold, 1.0, 15.0))
+
+def _composite(original_np: np.ndarray,
+               generated_np: np.ndarray,
+               delta_e_threshold: float,
+               flow_preset: int,
+               occlusion_threshold: float,
+               grow_px: int,
+               close_radius: int,
+               min_region_px: int,
+               feather_px: float) -> tuple:
+
+    H, W = original_np.shape[:2]
+    diag = _diag(H, W)
+    
+    orig_u8 = (np.clip(original_np, 0, 1) * 255).astype(np.uint8)
+    gen_u8  = (np.clip(generated_np, 0, 1) * 255).astype(np.uint8)
+    gray_orig = cv2.cvtColor(orig_u8, cv2.COLOR_RGB2GRAY)
+    gray_gen  = cv2.cvtColor(gen_u8,  cv2.COLOR_RGB2GRAY)
+
+    flow_fwd = _dis_flow(gray_orig, gray_gen, flow_preset)
+    flow_bwd = _dis_flow(gray_gen, gray_orig, flow_preset)
+
+    warped_gen_dense = _warp(generated_np.astype(np.float32), flow_fwd)
+    
+    blur_kernel = _blur_kernel_for_diag(diag)
+    orig_blur = cv2.GaussianBlur(original_np, blur_kernel, 0)
+    wgen_blur = cv2.GaussianBlur(warped_gen_dense, blur_kernel, 0)
+
+    orig_lab = _rgb_to_lab(orig_blur.reshape(-1, 3)).reshape(H, W, 3)
+    wgen_lab = _rgb_to_lab(wgen_blur.reshape(-1, 3)).reshape(H, W, 3)
+
+    lab_diff = orig_lab - wgen_lab
+    lab_diff[..., 0] *= 0.7
+    delta_e = np.sqrt((lab_diff**2).sum(axis=2))
+
+    sk = max(_blur_kernel_for_diag(diag)[0], 5)
+    if sk % 2 == 0: sk += 1
+    delta_e_smooth = cv2.GaussianBlur(delta_e, (sk, sk), 0)
+
+    auto_report = {}
+    if delta_e_threshold < 0:
+        delta_e_threshold = _auto_delta_e_threshold(delta_e_smooth)
+        auto_report["auto_delta_e"] = delta_e_threshold
+
+    if occlusion_threshold < 0:
+        occlusion_threshold = _auto_occlusion_threshold(flow_fwd, flow_bwd)
+        auto_report["auto_occlusion"] = occlusion_threshold
+
+    occluded = _occlusion_mask(flow_fwd, flow_bwd, occlusion_threshold)
+
+    changed = np.maximum((delta_e_smooth > delta_e_threshold).astype(np.float32), occluded)
+
+    if grow_px != 0:
+        changed = _grow_mask(changed, grow_px)
+    if close_radius > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_radius * 2 + 1, close_radius * 2 + 1))
+        changed = cv2.morphologyEx(changed.astype(np.uint8), cv2.MORPH_CLOSE, k).astype(np.float32)
+    if min_region_px > 0:
+        n, labeled, stats_cc, _ = cv2.connectedComponentsWithStats((changed > 0.5).astype(np.uint8), connectivity=8)
+        for i in range(1, n):
+            if stats_cc[i, cv2.CC_STAT_AREA] < min_region_px:
+                changed[labeled == i] = 0
+
+    sharp_mask = changed.copy()
+
+    if feather_px > 0:
+        inv_mask = (sharp_mask < 0.5).astype(np.uint8)
+        if inv_mask.min() == 0:
+            dist = cv2.distanceTransform(inv_mask, cv2.DIST_L2, 5)
+            fade_dist = feather_px * 3.0
+            t = np.clip(1.0 - (dist / fade_dist), 0.0, 1.0)
+            composite_mask = (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+        else:
+            composite_mask = sharp_mask
+    else:
+        composite_mask = sharp_mask
+
+    y_grid, x_grid = np.mgrid[0:H:10, 0:W:10]
+    pts_orig = np.stack([x_grid, y_grid], axis=-1).reshape(-1, 2).astype(np.float32)
+    
+    flow_sub = flow_fwd[0:H:10, 0:W:10].reshape(-1, 2)
+    mask_sub = sharp_mask[0:H:10, 0:W:10].reshape(-1)
+
+    bg_idx = mask_sub < 0.1
+    M = None
+    if bg_idx.sum() > 10:
+        src_pts = pts_orig[bg_idx]
+        dst_pts = src_pts + flow_sub[bg_idx]
+        
+        M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
+
+    if M is not None:
+        final_aligned_gen = cv2.warpAffine(
+            generated_np.astype(np.float32), 
+            M.astype(np.float64), 
+            (W, H), 
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, 
+            borderMode=cv2.BORDER_REFLECT
+        )
+    else:
+        final_aligned_gen = generated_np
+
+    m3 = composite_mask[..., np.newaxis]
+    result = np.clip(original_np * (1.0 - m3) + final_aligned_gen * m3, 0, 1)
+
+    flow_mag = np.sqrt((flow_fwd**2).sum(axis=2))
+    n_changed = int((sharp_mask > 0.5).sum())
+    stats = {
+        "changed_pct":    100 * n_changed / (H * W),
+        "occluded_px":    int(occluded.sum()),
+        "flow_mean_px":   float(flow_mag.mean()),
+        "flow_p99_px":    float(np.percentile(flow_mag, 99)),
+        "median_de":      float(np.median(delta_e)),
+        "resolution":     f"{W}x{H}",
+        "diagonal_px":    round(diag),
+    }
+    stats.update(auto_report)
+
+    return result, composite_mask, stats
+
 
 class LlamaTokenizerOptions(io.ComfyNode):
     @classmethod
@@ -1914,6 +2121,291 @@ class IntegerRangeRandom(io.ComfyNode):
         return io.NodeOutput(rng.randint(min_val, max_val))
 
 
+FLOW_PRESETS = {
+    "ultrafast": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
+    "fast":      cv2.DISOPTICAL_FLOW_PRESET_FAST,
+    "medium":    cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
+}
+
+
+class OpticalFlowComposite(io.ComfyNode):
+    """
+    Composites a Klein edit onto the original image.
+
+    v2.2: Global Rigid Alignment. Calculates a single global camera shift from 
+    unchanged background pixels and translates the entire generated image rigidly. 
+    Eliminates seam distortion while fixing AI background drift.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="OpticalFlowComposite",
+            category="image/Klein",
+            inputs=[
+                io.Image.Input("original_image"),
+                io.Image.Input("generated_image"),
+                io.Float.Input(
+                    "delta_e_threshold",
+                    default=-1.0, min=-1.0, max=100.0, step=1.0,
+                    tooltip="How different a pixel's color must be to count as 'edited'. Higher values = only obvious edits are detected (smaller mask, more original preserved). Lower values = subtle changes are also captured (larger mask, more of the generated image used). Set to -1 for automatic tuning."
+                ),
+                io.Float.Input(
+                    "grow_mask_pct",
+                    default=0.0, min=-3.0, max=3.0, step=0.1,
+                    tooltip="Expands or shrinks the detected edit region. Positive values grow the mask outward, capturing more of the surrounding area (useful if edges of the edit are being clipped). Negative values erode the mask inward, trimming the edges (useful if too much background is being pulled in)."
+                ),
+                io.Float.Input(
+                    "feather_pct",
+                    default=2.0, min=0.0, max=10.0, step=0.25,
+                    tooltip="How gradually the edit blends into the original at the mask boundary. Higher values create a wider, softer transition (smoother blending, but may wash out fine edges). Lower values create a sharper, more abrupt cutover (crisper edges, but seams may be more visible)."
+                ),
+                io.Combo.Input(
+                    "flow_quality",
+                    options=["medium", "fast", "ultrafast"],
+                    default="medium",
+                    tooltip="Accuracy of the optical flow alignment between original and generated images. Higher quality = more precise change detection and alignment (slower). Lower quality = faster processing but may miss subtle shifts or produce noisier masks."
+                ),
+                io.Float.Input(
+                    "occlusion_threshold",
+                    default=-1.0, min=-1.0, max=20.0, step=0.5,
+                    tooltip="Sensitivity to pixels that moved so much they can't be reliably matched between images. Higher values ignore more motion discrepancies (fewer false positives from camera jitter, but may miss real edits). Lower values flag more pixels as changed (catches more edits, but may over-detect in noisy areas). Set to -1 for automatic tuning."
+                ),
+                io.Float.Input(
+                    "close_radius_pct",
+                    default=0.5, min=0.0, max=5.0, step=0.1,
+                    tooltip="Fills small holes and gaps inside the detected edit region. Higher values close larger gaps (creates a more solid, continuous mask). Lower values leave small holes intact (preserves finer mask detail but may leave speckled artifacts inside the edit)."
+                ),
+                io.Float.Input(
+                    "min_region_pct",
+                    default=1.0, min=0.0, max=2.0, step=0.01,
+                    tooltip="Removes small isolated blobs from the mask that are likely false positives. Higher values filter out larger stray regions (cleaner mask, but may discard small intentional edits). Lower values keep smaller regions (preserves tiny edits, but may let through noise)."
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="composited_image"),
+                io.Mask.Output(display_name="change_mask"),
+                io.String.Output(display_name="report"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, original_image, generated_image,
+            delta_e_threshold=-1.0, grow_mask_pct=0.0, feather_pct=2.0,
+            flow_quality="medium", occlusion_threshold=-1.0,
+            close_radius_pct=0.5, min_region_pct=0.05):
+
+        orig_np = original_image[0].cpu().float().numpy()
+        gen_np  = generated_image[0].cpu().float().numpy()
+
+        if orig_np.shape != gen_np.shape:
+            H, W = gen_np.shape[:2]
+            pil  = Image.fromarray((orig_np * 255).astype(np.uint8))
+            orig_np = np.array(pil.resize((W, H), Image.LANCZOS)).astype(np.float32) / 255.0
+
+        H, W = gen_np.shape[:2]
+        diag = _diag(H, W)
+        total_area = H * W
+
+        grow_px    = round(grow_mask_pct * diag / 100.0)
+        feather_px = abs(feather_pct) * diag / 100.0
+        close_px   = _pct_to_px(close_radius_pct, diag)
+        min_px     = max(0, round(min_region_pct * total_area / 100.0))
+
+        result, change_mask, stats = _composite(
+            orig_np, gen_np,
+            delta_e_threshold   = delta_e_threshold,
+            flow_preset         = FLOW_PRESETS[flow_quality],
+            occlusion_threshold = occlusion_threshold,
+            grow_px             = grow_px,
+            close_radius        = close_px,
+            min_region_px       = min_px,
+            feather_px          = feather_px,
+        )
+
+        report_lines =[
+            "=== Klein Edit Composite v2.2 (Global Align) ===",
+            f"Resolution:       {stats['resolution']}  (diag {stats['diagonal_px']}px)",
+            f"",
+        ]
+
+        if "auto_delta_e" in stats:
+            report_lines.append(f"ΔE threshold:     AUTO → {stats['auto_delta_e']:.1f}")
+        else:
+            report_lines.append(f"ΔE threshold:     {delta_e_threshold:.1f}")
+
+        if "auto_occlusion" in stats:
+            report_lines.append(f"Occlusion thresh: AUTO → {stats['auto_occlusion']:.1f}")
+        else:
+            report_lines.append(f"Occlusion thresh: {occlusion_threshold:.1f}")
+
+        report_lines +=[
+            f"Grow mask:        {grow_mask_pct:+.1f}% → {grow_px:+d}px",
+            f"Feather:          {feather_pct:.1f}% → {feather_px:.0f}px",
+            f"Close radius:     {close_radius_pct:.1f}% → {close_px}px",
+            f"Min region:       {min_region_pct:.2f}% → {min_px}px",
+            f"Flow quality:     {flow_quality}",
+            f"",
+            f"Changed region:   {stats['changed_pct']:.1f}% of image",
+            f"Occluded pixels:  {stats['occluded_px']:,}",
+            f"Flow mean shift:  {stats['flow_mean_px']:.2f}px",
+            f"Flow p99 shift:   {stats['flow_p99_px']:.2f}px",
+            f"Median ΔE:        {stats['median_de']:.2f}",
+        ]
+        
+        return io.NodeOutput(torch.from_numpy(result).unsqueeze(0), 
+                torch.from_numpy(change_mask).unsqueeze(0), 
+                "\n".join(report_lines))
+
+
+class TextOverlayNode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="TextOverlayNode",
+            display_name="Text Overlay",
+            category="image/text",
+            inputs=[
+                io.Image.Input("image"),
+                io.String.Input("text", multiline=True, default="Hello World"),
+                io.Int.Input("font_size", default=32, min=1, max=1024),
+                io.String.Input("text_color", default="FFFFFF"),
+                io.String.Input("bg_color", default="000000"),
+                io.Boolean.Input("draw_background", default=True),
+                io.Int.Input("bg_padding", default=10, min=0, max=1024),
+                io.Float.Input("bg_transparency", default=0.5, min=0.0, max=1.0, step=0.05, tooltip="0.0 is fully transparent, 1.0 is fully opaque"),
+                io.Boolean.Input("use_percentage", default=False, tooltip="If True, top/bottom/left/right are treated as percentages (0-100) of the image size."),
+                io.Int.Input("top", default=-1, min=-1, max=8192, tooltip="-1 for center vertically or use bottom offset"),
+                io.Int.Input("bottom", default=-1, min=-1, max=8192, tooltip="-1 for center vertically or use top offset"),
+                io.Int.Input("left", default=-1, min=-1, max=8192, tooltip="-1 for center horizontally or use right offset"),
+                io.Int.Input("right", default=-1, min=-1, max=8192, tooltip="-1 for center horizontally or use left offset"),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        image,
+        text: str,
+        font_size: int,
+        text_color: str,
+        bg_color: str,
+        draw_background: bool,
+        bg_padding: int,
+        bg_transparency: float,
+        use_percentage: bool,
+        top: int,
+        bottom: int,
+        left: int,
+        right: int,
+    ) -> io.NodeOutput:
+        
+        t_color = _hex_to_rgb(text_color, (255, 255, 255))
+        
+        # Calculate background color with transparency (alpha 0-255)
+        b_color_base = _hex_to_rgb(bg_color, (0, 0, 0))
+        alpha = int(bg_transparency * 255.0)
+        # Ensure b_color is exactly 4 elements long for RGBA
+        if len(b_color_base) == 3:
+            b_color = (b_color_base[0], b_color_base[1], b_color_base[2], alpha)
+        else: # Handle case where _hex_to_rgb returns a 4-element tuple or default
+            b_color = (b_color_base[0], b_color_base[1], b_color_base[2], alpha)
+
+        # Try to load a font, fallback to default
+        try:
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except IOError:
+            try:
+                # Linux fallback
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+            except IOError:
+                font = ImageFont.load_default()
+
+        # Handle batch of images
+        batch_count = image.size(0) if len(image.shape) > 3 else 1
+        output_images = []
+
+        for i in range(batch_count):
+            img_tensor = image[i] if batch_count > 1 else image
+            # Tensor is typically (C, H, W) or (H, W, C) depending on context, assuming (H, W, C) here
+            # Convert to PIL
+            img_pil = Image.fromarray(np.clip(255.0 * img_tensor.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)).convert("RGBA")
+            
+            draw = ImageDraw.Draw(img_pil)
+            
+            # Calculate text size using textbbox
+            left_box, top_box, right_box, bottom_box = draw.textbbox((0, 0), text, font=font)
+            text_width = right_box - left_box
+            text_height = bottom_box - top_box
+
+            img_width, img_height = img_pil.size
+
+            # Calculate total width/height including background padding
+            total_width = text_width + (bg_padding * 2 if draw_background else 0)
+            total_height = text_height + (bg_padding * 2 if draw_background else 0)
+
+            # Resolve coordinates based on mode (pixels vs percentage)
+            def resolve_coord(val, max_val):
+                if val == -1:
+                    return -1
+                if use_percentage:
+                    return int((val / 100.0) * max_val)
+                return val
+
+            l_resolved = resolve_coord(left, img_width)
+            r_resolved = resolve_coord(right, img_width)
+            t_resolved = resolve_coord(top, img_height)
+            b_resolved = resolve_coord(bottom, img_height)
+
+            # Determine X position
+            if l_resolved == -1 and r_resolved == -1:
+                x_pos = (img_width - total_width) // 2
+            elif l_resolved != -1:
+                x_pos = l_resolved
+            else: # r_resolved != -1
+                x_pos = img_width - total_width - r_resolved
+
+            # Determine Y position
+            if t_resolved == -1 and b_resolved == -1:
+                y_pos = (img_height - total_height) // 2
+            elif t_resolved != -1:
+                y_pos = t_resolved
+            else: # b_resolved != -1
+                y_pos = img_height - total_height - b_resolved
+
+            # Draw background
+            if draw_background:
+                bg_rect = [x_pos, y_pos, x_pos + total_width, y_pos + total_height]
+                # To support alpha, we draw on a separate layer and composite
+                overlay = Image.new('RGBA', img_pil.size, (255, 255, 255, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                overlay_draw.rectangle(bg_rect, fill=b_color)
+                img_pil = Image.alpha_composite(img_pil, overlay)
+                draw = ImageDraw.Draw(img_pil) # Re-init draw for text on composited image
+
+            # Draw text
+            text_x = x_pos + (bg_padding if draw_background else 0)
+            text_y = y_pos + (bg_padding if draw_background else 0)
+            
+            # Use textbbox offset for more accurate vertical alignment of text
+            draw.text((text_x - left_box, text_y - top_box), text, fill=t_color, font=font)
+
+            # Convert back to tensor (RGB)
+            img_pil = img_pil.convert("RGB")
+            out_tensor = torch.from_numpy(np.array(img_pil).astype(np.float32) / 255.0)
+            output_images.append(out_tensor)
+
+        if batch_count > 1:
+            out = torch.stack(output_images, dim=0)
+        else:
+            out = output_images[0].unsqueeze(0)
+
+        return io.NodeOutput(out)
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -1945,6 +2437,8 @@ class SamplingUtils(ComfyExtension):
             SwitchInverseNode,
             SoftSwitchInverseNode,
             IntegerRangeRandom,
+            OpticalFlowComposite,
+            TextOverlayNode,
         ]
 
 
