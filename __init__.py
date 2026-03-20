@@ -341,23 +341,49 @@ def _auto_occlusion_threshold(flow_fwd: np.ndarray, flow_bwd: np.ndarray) -> flo
     threshold = p95 + max((p95 - p85) * 0.5, 0.5)
     return float(np.clip(threshold, 1.0, 15.0))
 
+def _match_histogram(source: np.ndarray, template: np.ndarray) -> np.ndarray:
+    """
+    Adjust the pixel values of a source image such that its histogram
+    matches that of a target template image.
+    Both source and template should be 2D numpy arrays (a single channel).
+    """
+    oldshape = source.shape
+    source_flat = source.ravel()
+    template_flat = template.ravel()
+    
+    # get the set of unique pixel values and their corresponding indices and counts
+    s_values, bin_idx, s_counts = np.unique(source_flat, return_inverse=True, return_counts=True)
+    t_values, t_counts = np.unique(template_flat, return_counts=True)
+    
+    # take the cumsum of the counts and normalize by the number of pixels to
+    # get the empirical cumulative distribution functions for the source and
+    # template images (maps pixel value --> quantile)
+    s_quantiles = np.cumsum(s_counts).astype(np.float64)
+    s_quantiles /= s_quantiles[-1]
+    
+    t_quantiles = np.cumsum(t_counts).astype(np.float64)
+    t_quantiles /= t_quantiles[-1]
+    
+    # interpolate linearly to find the pixel values in the template image
+    # that correspond most closely to the quantiles in the source image
+    interp_t_values = np.interp(s_quantiles, t_quantiles, t_values)
+    
+    return interp_t_values[bin_idx].reshape(oldshape)
+
 def _match_image_properties(
     original_tensor: torch.Tensor,
     generated_tensor: torch.Tensor,
     overall_weight: float,
     color_weight: float,
-    saturation_weight: float,
     lighting_weight: float,
+    mask_tensor: torch.Tensor = None,
 ) -> torch.Tensor:
-    # We will do color and lighting transfer in LAB space.
-    # Saturation transfer will be handled via blending in HSV space if needed, 
-    # but LAB a/b channels inherently affect colorfulness. We can just use HSV
-    # for saturation strictly.
     
     batch_size = generated_tensor.size(0)
     out_tensors = []
     
     orig_batch = original_tensor.size(0)
+    mask_batch = mask_tensor.size(0) if mask_tensor is not None else 0
     
     for i in range(batch_size):
         orig_i = i if i < orig_batch else 0
@@ -365,52 +391,45 @@ def _match_image_properties(
         orig_np = np.clip(255.0 * original_tensor[orig_i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
         gen_np = np.clip(255.0 * generated_tensor[i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
         
-        # LAB for Color & Lighting
-        orig_lab = cv2.cvtColor(orig_np, cv2.COLOR_RGB2LAB).astype(np.float32)
-        gen_lab = cv2.cvtColor(gen_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+        mask_np = None
+        if mask_tensor is not None:
+            mask_i = i if i < mask_batch else 0
+            # Extract mask, it might be (H, W) or (1, H, W) or (C, H, W)
+            # Typically comfy masks are (H, W)
+            m_t = mask_tensor[mask_i].cpu().numpy()
+            if m_t.ndim > 2:
+                m_t = m_t.squeeze()
+            if m_t.shape != gen_np.shape[:2]:
+                m_t = cv2.resize(m_t, (gen_np.shape[1], gen_np.shape[0]), interpolation=cv2.INTER_LINEAR)
+            mask_np = m_t[:, :, np.newaxis] # (H, W, 1)
         
-        # Means and Std Devs for LAB
-        orig_l_mean, orig_l_std = orig_lab[:, :, 0].mean(), orig_lab[:, :, 0].std()
-        orig_a_mean, orig_a_std = orig_lab[:, :, 1].mean(), orig_lab[:, :, 1].std()
-        orig_b_mean, orig_b_std = orig_lab[:, :, 2].mean(), orig_lab[:, :, 2].std()
+        orig_lab = cv2.cvtColor(orig_np, cv2.COLOR_RGB2LAB)
+        gen_lab = cv2.cvtColor(gen_np, cv2.COLOR_RGB2LAB)
         
-        gen_l_mean, gen_l_std = gen_lab[:, :, 0].mean(), gen_lab[:, :, 0].std()
-        gen_a_mean, gen_a_std = gen_lab[:, :, 1].mean(), gen_lab[:, :, 1].std()
-        gen_b_mean, gen_b_std = gen_lab[:, :, 2].mean(), gen_lab[:, :, 2].std()
+        out_lab = np.copy(gen_lab).astype(np.float32)
+        gen_lab_f = gen_lab.astype(np.float32)
         
-        out_lab = np.copy(gen_lab)
-        
-        # Calculate full transfer
-        l_trans = (gen_lab[:, :, 0] - gen_l_mean) * (orig_l_std / (gen_l_std + 1e-5)) + orig_l_mean
-        a_trans = (gen_lab[:, :, 1] - gen_a_mean) * (orig_a_std / (gen_a_std + 1e-5)) + orig_a_mean
-        b_trans = (gen_lab[:, :, 2] - gen_b_mean) * (orig_b_std / (gen_b_std + 1e-5)) + orig_b_mean
-        
-        # Blend based on weights
+        # 1. Lighting (L channel)
+        l_trans = _match_histogram(gen_lab[:, :, 0], orig_lab[:, :, 0])
         l_weight = lighting_weight * overall_weight
+        out_lab[:, :, 0] = gen_lab_f[:, :, 0] * (1.0 - l_weight) + l_trans * l_weight
+        
+        # 2. Color (A and B channels)
+        # If color_weight > 0, we match the A and B histograms
+        a_trans = _match_histogram(gen_lab[:, :, 1], orig_lab[:, :, 1])
+        b_trans = _match_histogram(gen_lab[:, :, 2], orig_lab[:, :, 2])
         c_weight = color_weight * overall_weight
         
-        out_lab[:, :, 0] = gen_lab[:, :, 0] * (1.0 - l_weight) + l_trans * l_weight
-        out_lab[:, :, 1] = gen_lab[:, :, 1] * (1.0 - c_weight) + a_trans * c_weight
-        out_lab[:, :, 2] = gen_lab[:, :, 2] * (1.0 - c_weight) + b_trans * c_weight
+        out_lab[:, :, 1] = gen_lab_f[:, :, 1] * (1.0 - c_weight) + a_trans * c_weight
+        out_lab[:, :, 2] = gen_lab_f[:, :, 2] * (1.0 - c_weight) + b_trans * c_weight
+        
+        # Apply soft masking if provided
+        if mask_np is not None:
+            out_lab = gen_lab_f * (1.0 - mask_np) + out_lab * mask_np
         
         out_lab = np.clip(out_lab, 0, 255).astype(np.uint8)
         res_rgb = cv2.cvtColor(out_lab, cv2.COLOR_LAB2RGB)
         
-        # Now handle Saturation in HSV space
-        if saturation_weight > 0.0:
-            res_hsv = cv2.cvtColor(res_rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
-            orig_hsv = cv2.cvtColor(orig_np, cv2.COLOR_RGB2HSV).astype(np.float32)
-            
-            orig_s_mean = orig_hsv[:, :, 1].mean()
-            gen_s_mean = res_hsv[:, :, 1].mean()
-            
-            sat_ratio = (orig_s_mean + 1e-5) / (gen_s_mean + 1e-5)
-            s_weight = saturation_weight * overall_weight
-            
-            effective_sat_ratio = 1.0 + (sat_ratio - 1.0) * s_weight
-            res_hsv[:, :, 1] = np.clip(res_hsv[:, :, 1] * effective_sat_ratio, 0, 255)
-            res_rgb = cv2.cvtColor(res_hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-            
         out_tensor = torch.from_numpy(res_rgb.astype(np.float32) / 255.0).unsqueeze(0)
         out_tensors.append(out_tensor)
         
@@ -2213,10 +2232,10 @@ class ImageMatchPropertiesNode(io.ComfyNode):
             inputs=[
                 io.Image.Input("original_image"),
                 io.Image.Input("generated_image"),
-                io.Float.Input("overall_weight", default=1.0, min=0.0, max=10.0, step=0.01),
-                io.Float.Input("color_weight", default=1.0, min=0.0, max=10.0, step=0.01),
-                io.Float.Input("saturation_weight", default=1.0, min=0.0, max=10.0, step=0.01),
-                io.Float.Input("lighting_weight", default=1.0, min=0.0, max=10.0, step=0.01),
+                io.Float.Input("overall_weight", default=1.0, min=0.0, max=1.0, step=0.001),
+                io.Float.Input("color_weight", default=1.0, min=0.0, max=1.0, step=0.001),
+                io.Float.Input("lighting_weight", default=1.0, min=0.0, max=1.0, step=0.001),
+                io.Mask.Input("mask", optional=True, tooltip="Optional mask to softly blend the color/lighting changes onto the generated image."),
             ],
             outputs=[
                 io.Image.Output(display_name="image"),
@@ -2230,16 +2249,16 @@ class ImageMatchPropertiesNode(io.ComfyNode):
         generated_image: torch.Tensor,
         overall_weight: float,
         color_weight: float,
-        saturation_weight: float,
         lighting_weight: float,
+        mask: torch.Tensor = None,
     ) -> io.NodeOutput:
         result = _match_image_properties(
             original_image,
             generated_image,
             overall_weight,
             color_weight,
-            saturation_weight,
             lighting_weight,
+            mask,
         )
         return io.NodeOutput(result)
 
