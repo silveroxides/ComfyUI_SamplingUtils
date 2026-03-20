@@ -376,6 +376,7 @@ def _match_image_properties(
     overall_weight: float,
     color_weight: float,
     lighting_weight: float,
+    texture_preservation: float,
     mask_tensor: torch.Tensor = None,
 ) -> torch.Tensor:
     
@@ -409,8 +410,26 @@ def _match_image_properties(
         out_lab = np.copy(gen_lab).astype(np.float32)
         gen_lab_f = gen_lab.astype(np.float32)
         
-        # 1. Lighting (L channel)
-        l_trans = _match_histogram(gen_lab[:, :, 0], orig_lab[:, :, 0])
+        # Detail extraction using Bilateral Filter to preserve edges
+        # We extract details from the generated image to add them back later
+        if texture_preservation > 0.0:
+            # Apply bilateral filter to the L channel to get the "base" lighting without textures
+            gen_l_base = cv2.bilateralFilter(gen_lab_f[:, :, 0], d=9, sigmaColor=75, sigmaSpace=75)
+            # The difference is our high-frequency texture/edge detail
+            gen_l_detail = gen_lab_f[:, :, 0] - gen_l_base
+            
+            # Apply bilateral filter to the original image L channel as well before matching
+            orig_l_base = cv2.bilateralFilter(orig_lab[:, :, 0].astype(np.float32), d=9, sigmaColor=75, sigmaSpace=75)
+            
+            # Match the base (textureless) lighting histograms
+            l_trans_base = _match_histogram(gen_l_base, orig_l_base)
+            
+            # Add the generated image's original texture back onto the matched base
+            l_trans = l_trans_base + (gen_l_detail * texture_preservation)
+        else:
+            # Standard matching if texture preservation is 0
+            l_trans = _match_histogram(gen_lab[:, :, 0], orig_lab[:, :, 0])
+            
         l_weight = lighting_weight * overall_weight
         out_lab[:, :, 0] = gen_lab_f[:, :, 0] * (1.0 - l_weight) + l_trans * l_weight
         
@@ -2235,6 +2254,7 @@ class ImageMatchPropertiesNode(io.ComfyNode):
                 io.Float.Input("overall_weight", default=1.0, min=0.0, max=1.0, step=0.001),
                 io.Float.Input("color_weight", default=1.0, min=0.0, max=1.0, step=0.001),
                 io.Float.Input("lighting_weight", default=1.0, min=0.0, max=1.0, step=0.001),
+                io.Float.Input("texture_preservation", default=0.5, min=0.0, max=1.0, step=0.001, tooltip="Preserves edges and textures from the generated image by matching only low-frequency properties."),
                 io.Mask.Input("mask", optional=True, tooltip="Optional mask to softly blend the color/lighting changes onto the generated image."),
             ],
             outputs=[
@@ -2250,6 +2270,7 @@ class ImageMatchPropertiesNode(io.ComfyNode):
         overall_weight: float,
         color_weight: float,
         lighting_weight: float,
+        texture_preservation: float,
         mask: torch.Tensor = None,
     ) -> io.NodeOutput:
         result = _match_image_properties(
@@ -2258,6 +2279,7 @@ class ImageMatchPropertiesNode(io.ComfyNode):
             overall_weight,
             color_weight,
             lighting_weight,
+            texture_preservation,
             mask,
         )
         return io.NodeOutput(result)
