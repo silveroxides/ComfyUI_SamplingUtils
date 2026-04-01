@@ -608,7 +608,7 @@ class SamplingParameters(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="SamplingParameters",
-            category="utils",
+            category="advanced",
             inputs=[
                 io.Int.Input(
                     id="width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16
@@ -775,7 +775,7 @@ class GetJsonKeyValue(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="GetJsonKeyValue",
-            category="utils",
+            category="advanced/utils",
             inputs=[
                 io.String.Input(
                     "json_path",
@@ -1033,7 +1033,8 @@ class SystemMessagePresets(io.ComfyNode):
         presets = cls.get_presets()
         return io.Schema(
             node_id="SystemMessagePresets",
-            category="advanced/conditioning",
+            category="advanced/text",
+            display_name="System Message Presets",
             inputs=[
                 io.Combo.Input(
                     "preset",
@@ -1069,7 +1070,8 @@ class InstructPromptPresets(io.ComfyNode):
         presets = cls.get_presets()
         return io.Schema(
             node_id="InstructPromptPresets",
-            category="advanced/conditioning",
+            category="advanced/text",
+            display_name="Instruct Prompt Presets",
             inputs=[
                 io.Combo.Input(
                     "preset",
@@ -1105,7 +1107,8 @@ class BonusPromptPresets(io.ComfyNode):
         presets = cls.get_presets()
         return io.Schema(
             node_id="BonusPromptPresets",
-            category="advanced/conditioning",
+            category="advanced/text",
+            display_name="Bonus Prompt Presets",
             inputs=[
                 io.Combo.Input(
                     "preset",
@@ -1141,7 +1144,8 @@ class EditTargetPresets(io.ComfyNode):
         presets = cls.get_presets()
         return io.Schema(
             node_id="EditTargetPresets",
-            category="advanced/conditioning",
+            category="advanced/text",
+            display_name="Edit Target Presets",
             inputs=[
                 io.Combo.Input(
                     "preset",
@@ -1177,7 +1181,8 @@ class EditOpPresets(io.ComfyNode):
         presets = cls.get_presets()
         return io.Schema(
             node_id="EditOpPresets",
-            category="advanced/conditioning",
+            category="advanced/text",
+            display_name="Edit Operation Presets",
             inputs=[
                 io.Combo.Input(
                     "preset",
@@ -1213,7 +1218,8 @@ class CameraShotPresets(io.ComfyNode):
         presets = cls.get_presets()
         return io.Schema(
             node_id="CameraShotPresets",
-            category="advanced/conditioning",
+            category="advanced/text",
+            display_name="Camera Shot Presets",
             inputs=[
                 io.Combo.Input(
                     "preset",
@@ -1231,6 +1237,137 @@ class CameraShotPresets(io.ComfyNode):
         presets_dict = cls.get_presets()
         camera_shot_prompt = presets_dict.get(preset, "")
         return io.NodeOutput(camera_shot_prompt)
+
+
+class VLMSysInstrPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        presets = {}
+        json_path = os.path.join(os.path.dirname(__file__), "system_instructions_vlm.json")
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                presets = json.load(f)
+        except Exception as e:
+            print(f"Error loading VLMSysInstrPresets: {e}")
+        return presets
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        options = sorted(list(presets.keys()))
+        default = options[0] if options else ""
+        return io.Schema(
+            node_id="VLMSysInstrPresets",
+            display_name="VLM System Instruction Presets",
+            category="advanced/text",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=options,
+                    default=default,
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="system_instruction"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        system_instruction = presets_dict.get(preset, "")
+        return io.NodeOutput(system_instruction)
+
+
+class VLMSysInstrAdvPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        presets = {}
+        json_path = os.path.join(
+            os.path.dirname(__file__), "system_instructions_vlm.json"
+        )
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                presets = json.load(f)
+        except Exception as e:
+            print(f"Error loading VLMSysInstrPresets: {e}")
+        return presets
+
+    @classmethod
+    def get_additional_instructions(cls):
+        instructions = {}
+        json_path = os.path.join(
+            os.path.dirname(__file__), "additional_instructions_vlm.json"
+        )
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                instructions = json.load(f)
+        except Exception as e:
+            print(f"Error loading additional_instructions_vlm: {e}")
+        return instructions
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        options = sorted(list(presets.keys()))
+        default = options[0] if options else ""
+        return io.Schema(
+            node_id="VLMSysInstrAdvPresets",
+            display_name="VLM System Instruction Advanced Presets",
+            category="advanced/text",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=options,
+                    default=default,
+                ),
+                io.Boolean.Input("jailbreak", default=False),
+                io.String.Input("system_query", multiline=True, default=""),
+                io.String.Input("user_query", multiline=True, default=""),
+            ],
+            outputs=[
+                io.String.Output(display_name="system_instruction"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset, jailbreak, system_query, user_query) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        additional = cls.get_additional_instructions()
+
+        system_instruction = presets_dict.get(preset, "")
+
+        # Start building the final output
+        # Formula: {jailbreak_prefix} + {chosen_preset_content} + {system_query_prefix} + {system_query_string} + {user_query_prefix} + {user_query_string} + {user_query_suffix} + {system_query_suffix} + {jailbreak_suffix}
+
+        result = system_instruction
+
+        # Apply system query wrapping
+        if system_query:
+            sq_prefix = additional.get("system_query_prefix", "")
+            sq_suffix = additional.get("system_query_suffix", "")
+            result = result + sq_prefix + system_query
+
+            # Apply user query nesting
+            if user_query:
+                uq_prefix = additional.get("user_query_prefix", "")
+                uq_suffix = additional.get("user_query_suffix", "")
+                result = result + uq_prefix + user_query + uq_suffix
+
+            result = result + sq_suffix
+        elif user_query:
+            # If system_query is empty but user_query is not, just add user query components
+            uq_prefix = additional.get("user_query_prefix", "")
+            uq_suffix = additional.get("user_query_suffix", "")
+            result = result + uq_prefix + user_query + uq_suffix
+
+        # Apply jailbreak wrapping
+        if jailbreak:
+            jb_prefix = additional.get("jailbreak_prefix", "")
+            jb_suffix = additional.get("jailbreak_suffix", "")
+            result = jb_prefix + result + jb_suffix
+
+        return io.NodeOutput(result)
 
 
 class UnifiedPresets(io.ComfyNode):
@@ -1259,7 +1396,7 @@ class UnifiedPresets(io.ComfyNode):
         return io.Schema(
             node_id="UnifiedPresets",
             display_name="Unified Presets (Primitive)",
-            category="primitives",
+            category="advanced/primitives",
             inputs=[
                 io.Combo.Input(
                     "preset",
@@ -1284,6 +1421,7 @@ class TextEncodeFlux2SystemPrompt(io.ComfyNode):
         return io.Schema(
             node_id="TextEncodeFlux2SystemPrompt",
             category="advanced/conditioning",
+            display_name="Text Encode with Flux2 dev System Prompt",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -1314,6 +1452,7 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
         return io.Schema(
             node_id="TextEncodeKleinSystemPrompt",
             category="advanced/conditioning",
+            display_name="Text Encode with Flux2 Klein System Prompt",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -1357,6 +1496,7 @@ class TextEncodeZITSystemPrompt(io.ComfyNode):
         return io.Schema(
             node_id="TextEncodeZITSystemPrompt",
             category="advanced/conditioning",
+            display_name="Text Encode with Z-Image System Prompt",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -1389,6 +1529,7 @@ class TextEncodeZImageThinkPrompt(io.ComfyNode):
         return io.Schema(
             node_id="TextEncodeZImageThinkPrompt",
             category="advanced/conditioning",
+            display_name="Text Encode with Z-Image Thinking Prompt",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -1492,6 +1633,7 @@ class ModifyMask(io.ComfyNode):
         return io.Schema(
             node_id="ModifyMask",
             category="utils/mask",
+            display_name="Modify Mask (Expand/Contract with options)",
             inputs=[
                 io.Mask.Input("mask"),
                 io.Int.Input(
@@ -1665,6 +1807,7 @@ class ImageBlendByMask(io.ComfyNode):
         return io.Schema(
             node_id="ImageBlendByMask",
             category="utils/mask",
+            display_name="Image Blend by Mask",
             inputs=[
                 io.Image.Input("destination"),
                 io.Image.Input("source"),
@@ -1772,7 +1915,7 @@ class FrakturPadNode(io.ComfyNode):
         return io.Schema(
             node_id="Frakturpad",
             display_name="Frakturpad (Text Obfuscation)",
-            category="text",
+            category="advanced/text",
             inputs=[
                 io.String.Input(
                     "text",
@@ -1806,7 +1949,7 @@ class UnFrakturPadNode(io.ComfyNode):
         return io.Schema(
             node_id="UnFrakturPad",
             display_name="UnFrakturPad (Text Deobfuscation)",
-            category="text",
+            category="advanced/text",
             inputs=[
                 io.String.Input(
                     "text",
@@ -1839,7 +1982,7 @@ class JoinerPadding(io.ComfyNode):
         return io.Schema(
             node_id="JoinerPadding",
             display_name="Joiner Padding",
-            category="text",
+            category="advanced/text",
             inputs=[
                 io.String.Input(
                     "text",
@@ -1872,7 +2015,7 @@ class IdeographicTagPad(io.ComfyNode):
         return io.Schema(
             node_id="IdeographicTagPad",
             display_name="IdeographicTagPad (Text Obfuscation)",
-            category="text",
+            category="advanced/text",
             inputs=[
                 io.String.Input(
                     "text",
@@ -1905,7 +2048,7 @@ class IdeographicLinePad(io.ComfyNode):
         return io.Schema(
             node_id="IdeographicLinePad",
             display_name="IdeographicLinePad (Text Obfuscation)",
-            category="text",
+            category="advanced/text",
             inputs=[
                 io.String.Input(
                     "text",
@@ -1938,7 +2081,7 @@ class IdeographicSentencePad(io.ComfyNode):
         return io.Schema(
             node_id="IdeographicSentencePad",
             display_name="IdeographicSentencePad (Text Obfuscation)",
-            category="text",
+            category="advanced/text",
             inputs=[
                 io.String.Input(
                     "text",
@@ -2002,7 +2145,7 @@ class SU_LoadImagePath(io.ComfyNode):
         return io.Schema(
             node_id="SU_LoadImagePath",
             display_name="Load Image (Path)",
-            category="image",
+            category="advanced/image",
             inputs=[
                 io.String.Input(
                     "image_path",
@@ -2135,7 +2278,7 @@ class SU_LoadImageDirectory(io.ComfyNode):
         return io.Schema(
             node_id="SU_LoadImageDirectory",
             display_name="Load Images (Directory)",
-            category="image",
+            category="advanced/image",
             inputs=[
                 io.String.Input(
                     "directory_path",
@@ -2350,7 +2493,7 @@ class ImageMatchPropertiesNode(io.ComfyNode):
         return io.Schema(
             node_id="ImageMatchProperties",
             display_name="Image Match Properties",
-            category="image",
+            category="advanced/image",
             inputs=[
                 io.Image.Input("original_image"),
                 io.Image.Input("generated_image"),
@@ -2401,7 +2544,8 @@ class OpticalFlowComposite(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="OpticalFlowComposite",
-            category="image/Klein",
+            display_name="Optical Flow Composite (Global Align)",
+            category="advanced/image",
             inputs=[
                 io.Image.Input("original_image"),
                 io.Image.Input("generated_image"),
@@ -2524,7 +2668,7 @@ class TextOverlayNode(io.ComfyNode):
         return io.Schema(
             node_id="TextOverlayNode",
             display_name="Text Overlay",
-            category="image/text",
+            category="advanced/image",
             inputs=[
                 io.Image.Input("image"),
                 io.String.Input("text", multiline=True, default="Hello World"),
@@ -2723,6 +2867,8 @@ class SamplingUtils(ComfyExtension):
             EditTargetPresets,
             EditOpPresets,
             CameraShotPresets,
+            VLMSysInstrPresets,
+            VLMSysInstrAdvPresets,
             UnifiedPresets,
             FrakturPadNode,
             UnFrakturPadNode,
