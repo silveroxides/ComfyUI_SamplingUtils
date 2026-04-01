@@ -24,6 +24,9 @@ from nodes import MAX_RESOLUTION
 from . import system_messages
 from . import instruct_prompts
 from . import bonus_prompts
+from . import edit_target_prompts
+from . import edit_op_prompts
+from . import camera_shot_prompts
 
 
 def round_to_nearest(n, m):
@@ -1023,8 +1026,6 @@ class SystemMessagePresets(io.ComfyNode):
                         presets["F2_SYSTEM_MESSAGE_UPSAMPLING_T2I"] = val
                     elif name.startswith("SYSTEM_MESSAGE_STYLE_"):
                         presets[name.replace("SYSTEM_MESSAGE_", "")] = val
-                    else:
-                        presets[name] = val
         return presets
 
     @classmethod
@@ -1057,13 +1058,10 @@ class InstructPromptPresets(io.ComfyNode):
     def get_presets(cls):
         presets = {}
         for name in dir(instruct_prompts):
-            if name.startswith("INSTRUCT_PROMPT"):
+            if name.startswith("INSTRUCT_PROMPT_STYLE_"):
                 val = getattr(instruct_prompts, name)
                 if isinstance(val, str):
-                    if name.startswith("INSTRUCT_PROMPT_STYLE_"):
-                        presets[name.replace("INSTRUCT_PROMPT_", "")] = val
-                    else:
-                        presets[name] = val
+                    presets[name.replace("INSTRUCT_PROMPT_", "")] = val
         return presets
 
     @classmethod
@@ -1096,13 +1094,10 @@ class BonusPromptPresets(io.ComfyNode):
     def get_presets(cls):
         presets = {}
         for name in dir(bonus_prompts):
-            if name.startswith("BONUS_PROMPT"):
+            if name.startswith("BONUS_PROMPT_STYLE_"):
                 val = getattr(bonus_prompts, name)
                 if isinstance(val, str):
-                    if name.startswith("BONUS_PROMPT_STYLE_"):
-                        presets[name.replace("BONUS_PROMPT_", "")] = val
-                    else:
-                        presets[name] = val
+                    presets[name.replace("BONUS_PROMPT_", "")] = val
         return presets
 
     @classmethod
@@ -1128,6 +1123,114 @@ class BonusPromptPresets(io.ComfyNode):
         presets_dict = cls.get_presets()
         bonus_prompt = presets_dict.get(preset, "")
         return io.NodeOutput(bonus_prompt)
+
+
+class EditTargetPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        presets = {}
+        for name in dir(edit_target_prompts):
+            if name.startswith("BONUS_PROMPT_EDIT_TARGET_"):
+                val = getattr(edit_target_prompts, name)
+                if isinstance(val, str):
+                    presets[name.replace("BONUS_PROMPT_EDIT_TARGET_", "")] = val
+        return presets
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="EditTargetPresets",
+            category="advanced/conditioning",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default=sorted(list(presets.keys()))[0] if presets else "",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="edit_target_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        edit_target_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(edit_target_prompt)
+
+
+class EditOpPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        presets = {}
+        for name in dir(edit_op_prompts):
+            if name.startswith("INSTRUCT_PROMPT_EDIT_OP_"):
+                val = getattr(edit_op_prompts, name)
+                if isinstance(val, str):
+                    presets[name.replace("INSTRUCT_PROMPT_EDIT_OP_", "")] = val
+        return presets
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="EditOpPresets",
+            category="advanced/conditioning",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default=sorted(list(presets.keys()))[0] if presets else "",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="edit_op_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        edit_op_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(edit_op_prompt)
+
+
+class CameraShotPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        presets = {}
+        for name in dir(camera_shot_prompts):
+            if name.startswith("INSTRUCT_PROMPT_CAMERA_SHOT_"):
+                val = getattr(camera_shot_prompts, name)
+                if isinstance(val, str):
+                    presets[name.replace("INSTRUCT_PROMPT_CAMERA_SHOT_", "")] = val
+        return presets
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="CameraShotPresets",
+            category="advanced/conditioning",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default=sorted(list(presets.keys()))[0] if presets else "",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="camera_shot_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        camera_shot_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(camera_shot_prompt)
 
 
 class UnifiedPresets(io.ComfyNode):
@@ -2562,6 +2665,41 @@ class TextOverlayNode(io.ComfyNode):
 
         return io.NodeOutput(out)
 
+class RandInt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="PrimitiveRandomInt",
+            display_name="RandomInt",
+            category="utils/primitive",
+            inputs=[
+                io.Int.Input("value", min=-sys.maxsize, max=sys.maxsize, control_after_generate=True),
+            ],
+            outputs=[io.Int.Output()],
+        )
+
+    @classmethod
+    def execute(cls, value: int) -> io.NodeOutput:
+        return io.NodeOutput(value)
+
+
+class StaticInt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="PrimitiveStaticInt",
+            display_name="StaticInt",
+            category="utils/primitive",
+            inputs=[
+                io.Int.Input("value", min=-sys.maxsize, max=sys.maxsize),
+            ],
+            outputs=[io.Int.Output()],
+        )
+
+    @classmethod
+    def execute(cls, value: int) -> io.NodeOutput:
+        return io.NodeOutput(value)
+
 
 class SamplingUtils(ComfyExtension):
     @override
@@ -2582,6 +2720,9 @@ class SamplingUtils(ComfyExtension):
             SystemMessagePresets,
             InstructPromptPresets,
             BonusPromptPresets,
+            EditTargetPresets,
+            EditOpPresets,
+            CameraShotPresets,
             UnifiedPresets,
             FrakturPadNode,
             UnFrakturPadNode,
@@ -2597,6 +2738,8 @@ class SamplingUtils(ComfyExtension):
             ImageMatchPropertiesNode,
             OpticalFlowComposite,
             TextOverlayNode,
+            RandInt,
+            StaticInt,
         ]
 
 
