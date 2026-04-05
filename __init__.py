@@ -2809,6 +2809,118 @@ class TextOverlayNode(io.ComfyNode):
 
         return io.NodeOutput(out)
 
+class TagNormalizeCombine(io.ComfyNode):
+    """
+    Node that normalizes scores in two sets of tags and combines them,
+    deduplicating and sorting by the normalized scores.
+    """
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="TagNormalizeCombine",
+            display_name="Tag Normalize and Combine",
+            category="advanced/text",
+            inputs=[
+                io.String.Input("tags_1", multiline=True, default=""),
+                io.String.Input("tags_2", multiline=True, default=""),
+                io.AnyType.Input(
+                    "scores_1",
+                    tooltip="Dictionary of scores for tags_1",
+                ),
+                io.AnyType.Input(
+                    "scores_2",
+                    tooltip="Dictionary of scores for tags_2",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="deduped_tags"),
+                io.AnyType.Output(display_name="normalized_scores"),
+            ],
+        )
+
+    @staticmethod
+    def normalize_scores(scores: dict, min_val=0.000001, max_val=0.999999) -> dict:
+        if not scores:
+            return {}
+
+        current_scores = [float(v) for v in scores.values()]
+        current_min = min(current_scores)
+        current_max = max(current_scores)
+
+        if current_max == current_min:
+            return {k: max_val for k in scores.keys()}
+
+        normalized = {}
+        for k, v in scores.items():
+            norm = min_val + (float(v) - current_min) / (current_max - current_min) * (
+                max_val - min_val
+            )
+            normalized[k] = norm
+        return normalized
+
+    @classmethod
+    def execute(
+        cls, tags_1: Union[str, list], tags_2: Union[str, list], scores_1: Union[str, dict], scores_2: Union[str, dict]
+    ) -> io.NodeOutput:
+        # Parse scores
+        def parse_scores(s_input):
+            if isinstance(s_input, dict):
+                return s_input
+            if not s_input or not isinstance(s_input, str):
+                return {}
+            try:
+                return json.loads(s_input)
+            except json.JSONDecodeError:
+                return {}
+
+        s1 = parse_scores(scores_1)
+        s2 = parse_scores(scores_2)
+
+        # Normalize scores independently
+        norm_s1 = cls.normalize_scores(s1)
+        norm_s2 = cls.normalize_scores(s2)
+
+        # Parse tags
+        def parse_tags(t_input):
+            if isinstance(t_input, list):
+                return [str(t).strip() for t in t_input if t]
+            if not t_input or not isinstance(t_input, str):
+                return []
+            # Split by comma and handle potential spaces
+            return [t.strip() for t in t_input.split(",") if t.strip()]
+
+        t1_list = parse_tags(tags_1)
+        t2_list = parse_tags(tags_2)
+
+        # Combine and deduplicate
+        combined_scores = {}
+
+        # Process first set
+        for t in t1_list:
+            score = norm_s1.get(t, 0.000001)
+            combined_scores[t] = score
+
+        # Process second set with deduplication logic
+        for t in t2_list:
+            score = norm_s2.get(t, 0.000001)
+            if t in combined_scores:
+                # Keep the one with the highest normalized score
+                if score > combined_scores[t]:
+                    combined_scores[t] = score
+            else:
+                combined_scores[t] = score
+
+        # Sort tags by normalized scores (descending)
+        sorted_tags = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)
+
+        # Prepare outputs
+        deduped_tags_str = ", ".join(sorted_tags)
+        normalized_scores_dict = {tag: combined_scores[tag] for tag in sorted_tags}
+
+        return io.NodeOutput(deduped_tags_str, normalized_scores_dict)
+
+
 class RandInt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -2876,6 +2988,7 @@ class SamplingUtils(ComfyExtension):
             IdeographicTagPad,
             IdeographicLinePad,
             IdeographicSentencePad,
+            TagNormalizeCombine,
             SU_LoadImagePath,
             SU_LoadImageDirectory,
             SwitchInverseNode,
