@@ -353,24 +353,24 @@ def _match_histogram(source: np.ndarray, template: np.ndarray) -> np.ndarray:
     oldshape = source.shape
     source_flat = source.ravel()
     template_flat = template.ravel()
-    
+
     # get the set of unique pixel values and their corresponding indices and counts
     s_values, bin_idx, s_counts = np.unique(source_flat, return_inverse=True, return_counts=True)
     t_values, t_counts = np.unique(template_flat, return_counts=True)
-    
+
     # take the cumsum of the counts and normalize by the number of pixels to
     # get the empirical cumulative distribution functions for the source and
     # template images (maps pixel value --> quantile)
     s_quantiles = np.cumsum(s_counts).astype(np.float64)
     s_quantiles /= s_quantiles[-1]
-    
+
     t_quantiles = np.cumsum(t_counts).astype(np.float64)
     t_quantiles /= t_quantiles[-1]
-    
+
     # interpolate linearly to find the pixel values in the template image
     # that correspond most closely to the quantiles in the source image
     interp_t_values = np.interp(s_quantiles, t_quantiles, t_values)
-    
+
     return interp_t_values[bin_idx].reshape(oldshape)
 
 def _match_image_properties(
@@ -382,19 +382,19 @@ def _match_image_properties(
     texture_preservation: float,
     mask_tensor: torch.Tensor = None,
 ) -> torch.Tensor:
-    
+
     batch_size = generated_tensor.size(0)
     out_tensors = []
-    
+
     orig_batch = original_tensor.size(0)
     mask_batch = mask_tensor.size(0) if mask_tensor is not None else 0
-    
+
     for i in range(batch_size):
         orig_i = i if i < orig_batch else 0
-        
+
         orig_np = np.clip(255.0 * original_tensor[orig_i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
         gen_np = np.clip(255.0 * generated_tensor[i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
-        
+
         mask_np = None
         if mask_tensor is not None:
             mask_i = i if i < mask_batch else 0
@@ -406,13 +406,13 @@ def _match_image_properties(
             if m_t.shape != gen_np.shape[:2]:
                 m_t = cv2.resize(m_t, (gen_np.shape[1], gen_np.shape[0]), interpolation=cv2.INTER_LINEAR)
             mask_np = m_t[:, :, np.newaxis] # (H, W, 1)
-        
+
         orig_lab = cv2.cvtColor(orig_np, cv2.COLOR_RGB2LAB)
         gen_lab = cv2.cvtColor(gen_np, cv2.COLOR_RGB2LAB)
-        
+
         out_lab = np.copy(gen_lab).astype(np.float32)
         gen_lab_f = gen_lab.astype(np.float32)
-        
+
         # Detail extraction using Bilateral Filter to preserve edges
         # We extract details from the generated image to add them back later
         if texture_preservation > 0.0:
@@ -420,41 +420,41 @@ def _match_image_properties(
             gen_l_base = cv2.bilateralFilter(gen_lab_f[:, :, 0], d=9, sigmaColor=75, sigmaSpace=75)
             # The difference is our high-frequency texture/edge detail
             gen_l_detail = gen_lab_f[:, :, 0] - gen_l_base
-            
+
             # Apply bilateral filter to the original image L channel as well before matching
             orig_l_base = cv2.bilateralFilter(orig_lab[:, :, 0].astype(np.float32), d=9, sigmaColor=75, sigmaSpace=75)
-            
+
             # Match the base (textureless) lighting histograms
             l_trans_base = _match_histogram(gen_l_base, orig_l_base)
-            
+
             # Add the generated image's original texture back onto the matched base
             l_trans = l_trans_base + (gen_l_detail * texture_preservation)
         else:
             # Standard matching if texture preservation is 0
             l_trans = _match_histogram(gen_lab[:, :, 0], orig_lab[:, :, 0])
-            
+
         l_weight = lighting_weight * overall_weight
         out_lab[:, :, 0] = gen_lab_f[:, :, 0] * (1.0 - l_weight) + l_trans * l_weight
-        
+
         # 2. Color (A and B channels)
         # If color_weight > 0, we match the A and B histograms
         a_trans = _match_histogram(gen_lab[:, :, 1], orig_lab[:, :, 1])
         b_trans = _match_histogram(gen_lab[:, :, 2], orig_lab[:, :, 2])
         c_weight = color_weight * overall_weight
-        
+
         out_lab[:, :, 1] = gen_lab_f[:, :, 1] * (1.0 - c_weight) + a_trans * c_weight
         out_lab[:, :, 2] = gen_lab_f[:, :, 2] * (1.0 - c_weight) + b_trans * c_weight
-        
+
         # Apply soft masking if provided
         if mask_np is not None:
             out_lab = gen_lab_f * (1.0 - mask_np) + out_lab * mask_np
-        
+
         out_lab = np.clip(out_lab, 0, 255).astype(np.uint8)
         res_rgb = cv2.cvtColor(out_lab, cv2.COLOR_LAB2RGB)
-        
+
         out_tensor = torch.from_numpy(res_rgb.astype(np.float32) / 255.0).unsqueeze(0)
         out_tensors.append(out_tensor)
-        
+
     return torch.cat(out_tensors, dim=0)
 
 def _composite(original_np: np.ndarray,
@@ -469,7 +469,7 @@ def _composite(original_np: np.ndarray,
 
     H, W = original_np.shape[:2]
     diag = _diag(H, W)
-    
+
     orig_u8 = (np.clip(original_np, 0, 1) * 255).astype(np.uint8)
     gen_u8  = (np.clip(generated_np, 0, 1) * 255).astype(np.uint8)
     gray_orig = cv2.cvtColor(orig_u8, cv2.COLOR_RGB2GRAY)
@@ -479,7 +479,7 @@ def _composite(original_np: np.ndarray,
     flow_bwd = _dis_flow(gray_gen, gray_orig, flow_preset)
 
     warped_gen_dense = _warp(generated_np.astype(np.float32), flow_fwd)
-    
+
     blur_kernel = _blur_kernel_for_diag(diag)
     orig_blur = cv2.GaussianBlur(original_np, blur_kernel, 0)
     wgen_blur = cv2.GaussianBlur(warped_gen_dense, blur_kernel, 0)
@@ -535,7 +535,7 @@ def _composite(original_np: np.ndarray,
 
     y_grid, x_grid = np.mgrid[0:H:10, 0:W:10]
     pts_orig = np.stack([x_grid, y_grid], axis=-1).reshape(-1, 2).astype(np.float32)
-    
+
     flow_sub = flow_fwd[0:H:10, 0:W:10].reshape(-1, 2)
     mask_sub = sharp_mask[0:H:10, 0:W:10].reshape(-1)
 
@@ -544,15 +544,15 @@ def _composite(original_np: np.ndarray,
     if bg_idx.sum() > 10:
         src_pts = pts_orig[bg_idx]
         dst_pts = src_pts + flow_sub[bg_idx]
-        
+
         M, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
 
     if M is not None:
         final_aligned_gen = cv2.warpAffine(
-            generated_np.astype(np.float32), 
-            M.astype(np.float64), 
-            (W, H), 
-            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, 
+            generated_np.astype(np.float32),
+            M.astype(np.float64),
+            (W, H),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
             borderMode=cv2.BORDER_REFLECT
         )
     else:
@@ -2535,8 +2535,8 @@ class OpticalFlowComposite(io.ComfyNode):
     """
     Composites a Klein edit onto the original image.
 
-    v2.2: Global Rigid Alignment. Calculates a single global camera shift from 
-    unchanged background pixels and translates the entire generated image rigidly. 
+    v2.2: Global Rigid Alignment. Calculates a single global camera shift from
+    unchanged background pixels and translates the entire generated image rigidly.
     Eliminates seam distortion while fixing AI background drift.
     """
 
@@ -2656,9 +2656,9 @@ class OpticalFlowComposite(io.ComfyNode):
             f"Flow p99 shift:   {stats['flow_p99_px']:.2f}px",
             f"Median ΔE:        {stats['median_de']:.2f}",
         ]
-        
-        return io.NodeOutput(torch.from_numpy(result).unsqueeze(0), 
-                torch.from_numpy(change_mask).unsqueeze(0), 
+
+        return io.NodeOutput(torch.from_numpy(result).unsqueeze(0),
+                torch.from_numpy(change_mask).unsqueeze(0),
                 "\n".join(report_lines))
 
 
@@ -2706,9 +2706,9 @@ class TextOverlayNode(io.ComfyNode):
         left: int,
         right: int,
     ) -> io.NodeOutput:
-        
+
         t_color = _hex_to_rgb(text_color, (255, 255, 255))
-        
+
         # Calculate background color with transparency (alpha 0-255)
         b_color_base = _hex_to_rgb(bg_color, (0, 0, 0))
         alpha = int(bg_transparency * 255.0)
@@ -2737,9 +2737,9 @@ class TextOverlayNode(io.ComfyNode):
             # Tensor is typically (C, H, W) or (H, W, C) depending on context, assuming (H, W, C) here
             # Convert to PIL
             img_pil = Image.fromarray(np.clip(255.0 * img_tensor.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)).convert("RGBA")
-            
+
             draw = ImageDraw.Draw(img_pil)
-            
+
             # Calculate text size using textbbox
             left_box, top_box, right_box, bottom_box = draw.textbbox((0, 0), text, font=font)
             text_width = right_box - left_box
@@ -2793,7 +2793,7 @@ class TextOverlayNode(io.ComfyNode):
             # Draw text
             text_x = x_pos + (bg_padding if draw_background else 0)
             text_y = y_pos + (bg_padding if draw_background else 0)
-            
+
             # Use textbbox offset for more accurate vertical alignment of text
             draw.text((text_x - left_box, text_y - top_box), text, fill=t_color, font=font)
 
@@ -2827,10 +2827,12 @@ class TagNormalizeCombine(io.ComfyNode):
                 io.AnyType.Input(
                     "scores_1",
                     tooltip="Dictionary of scores for tags_1",
+                    optional=True,
                 ),
                 io.AnyType.Input(
                     "scores_2",
                     tooltip="Dictionary of scores for tags_2",
+                    optional=True,
                 ),
             ],
             outputs=[
@@ -2861,26 +2863,8 @@ class TagNormalizeCombine(io.ComfyNode):
 
     @classmethod
     def execute(
-        cls, tags_1: Union[str, list], tags_2: Union[str, list], scores_1: Union[str, dict], scores_2: Union[str, dict]
+        cls, tags_1: Union[str, list], tags_2: Union[str, list], scores_1: Union[str, dict] = None, scores_2: Union[str, dict] = None
     ) -> io.NodeOutput:
-        # Parse scores
-        def parse_scores(s_input):
-            if isinstance(s_input, dict):
-                return s_input
-            if not s_input or not isinstance(s_input, str):
-                return {}
-            try:
-                return json.loads(s_input)
-            except json.JSONDecodeError:
-                return {}
-
-        s1 = parse_scores(scores_1)
-        s2 = parse_scores(scores_2)
-
-        # Normalize scores independently
-        norm_s1 = cls.normalize_scores(s1)
-        norm_s2 = cls.normalize_scores(s2)
-
         # Parse tags
         def parse_tags(t_input):
             if isinstance(t_input, list):
@@ -2892,6 +2876,41 @@ class TagNormalizeCombine(io.ComfyNode):
 
         t1_list = parse_tags(tags_1)
         t2_list = parse_tags(tags_2)
+
+        # Handle scores
+        def process_scores(s_input, t_list):
+            if s_input is None:
+                # Generate even distribution
+                if not t_list:
+                    return {}
+                num_tags = len(t_list)
+                if num_tags == 1:
+                    return {t_list[0]: 0.999999}
+
+                max_v = 0.999999
+                min_v = 0.000001
+                scores = {}
+                for i, tag in enumerate(t_list):
+                    # Linearly interpolate from max_v down to min_v
+                    score = max_v - i * (max_v - min_v) / (num_tags - 1)
+                    scores[tag] = score
+                return scores
+
+            # Parse existing scores
+            def parse_s(s_in):
+                if isinstance(s_in, dict):
+                    return s_in
+                if not s_in or not isinstance(s_in, str):
+                    return {}
+                try:
+                    return json.loads(s_in)
+                except json.JSONDecodeError:
+                    return {}
+
+            return cls.normalize_scores(parse_s(s_input))
+
+        norm_s1 = process_scores(scores_1, t1_list)
+        norm_s2 = process_scores(scores_2, t2_list)
 
         # Combine and deduplicate
         combined_scores = {}
@@ -2957,6 +2976,27 @@ class StaticInt(io.ComfyNode):
         return io.NodeOutput(value)
 
 
+class RandIntRange(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="PrimitiveRandomIntRange",
+            display_name="RandomIntRange",
+            category="utils/primitive",
+            inputs=[
+                io.Int.Input("min", default=0, min=-sys.maxsize, max=sys.maxsize),
+                io.Int.Input("max", default=100, min=-sys.maxsize, max=sys.maxsize),
+                io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True),
+            ],
+            outputs=[io.Int.Output()],
+        )
+
+    @classmethod
+    def execute(cls, min: int, max: int, seed: int) -> io.NodeOutput:
+        rng = random.Random(seed)
+        return io.NodeOutput(rng.randint(min, max))
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -2999,6 +3039,7 @@ class SamplingUtils(ComfyExtension):
             TextOverlayNode,
             RandInt,
             StaticInt,
+            RandIntRange,
         ]
 
 
