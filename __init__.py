@@ -1279,6 +1279,61 @@ class VLMSysInstrPresets(io.ComfyNode):
         return io.NodeOutput(system_instruction)
 
 
+class VLMSysQueryAddPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        base_names = set()
+        json_path = os.path.join(os.path.dirname(__file__), "system_query_additional_vlm.json")
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for key in data:
+                    base_names.add(key.removesuffix("_prefix").removesuffix("_suffix"))
+        except Exception as e:
+            print(f"Error loading VLMSysQueryAddPresets: {e}")
+        return sorted(list(base_names))
+
+    @classmethod
+    def define_schema(cls):
+        options = cls.get_presets()
+        default = options[0] if options else ""
+        return io.Schema(
+            node_id="VLMSysQueryAddPresets",
+            display_name="VLM System Query Add Presets",
+            category="advanced/text",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=options,
+                    default=default,
+                ),
+                io.String.Input(
+                    "text",
+                    multiline=True,
+                    default="",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="system_query_additional"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset, text) -> io.NodeOutput:
+        json_path = os.path.join(os.path.dirname(__file__), "system_query_additional_vlm.json")
+        prefix = ""
+        suffix = ""
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                prefix = data.get(f"{preset}_prefix", "")
+                suffix = data.get(f"{preset}_suffix", "")
+        except Exception as e:
+            print(f"Error executing VLMSysQueryAddPresets: {e}")
+            
+        return io.NodeOutput(f"{prefix}{text}{suffix}")
+
+
 class VLMSysInstrAdvPresets(io.ComfyNode):
     @classmethod
     def get_presets(cls):
@@ -3020,6 +3075,7 @@ class SamplingUtils(ComfyExtension):
             EditOpPresets,
             CameraShotPresets,
             VLMSysInstrPresets,
+            VLMSysQueryAddPresets,
             VLMSysInstrAdvPresets,
             UnifiedPresets,
             FrakturPadNode,
