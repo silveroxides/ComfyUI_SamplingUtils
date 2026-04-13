@@ -3080,7 +3080,7 @@ class UNETLoaderAsync(io.ComfyNode):
             inputs=[
                 io.Combo.Input("unet_name", folder_paths.get_filename_list("diffusion_models"), tooltip="Select a UNET model to load."),
                 io.Combo.Input("weight_dtype", options=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"], advanced=True),
-                io.Boolean.Input("disable_dynamic_vram", default=True, advanced=True, tooltip="If true, disables dynamic VRAM optimizations when loading the UNET. This can reduce VRAM usage at the cost of potentially higher CPU usage and slower performance. Recommended to keep enabled unless you are experiencing VRAM-related issues with certain models.")
+                io.Boolean.Input("disable_dynamic_vram", default=False, advanced=True, tooltip="If true, disables dynamic VRAM optimizations when loading the UNET. This can reduce VRAM usage at the cost of potentially higher CPU usage and slower performance. Recommended to keep enabled unless you are experiencing VRAM-related issues with certain models.")
             ],
             outputs=[
                 io.Model.Output(display_name="model"),
