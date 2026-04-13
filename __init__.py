@@ -11,9 +11,11 @@ import scipy
 import hashlib
 import pilgram
 import cv2
+import logging
 import math
 from tqdm import tqdm
 from typing_extensions import override
+import comfy
 from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
 from comfy_api.latest import ComfyExtension, io
 from comfy import model_management
@@ -21,6 +23,7 @@ import nodes
 import node_helpers
 import folder_paths
 from nodes import MAX_RESOLUTION
+from unifiedefficientloader import UnifiedSafetensorsLoader
 from . import system_messages
 from . import instruct_prompts
 from . import bonus_prompts
@@ -28,6 +31,22 @@ from . import edit_target_prompts
 from . import edit_op_prompts
 from . import camera_shot_prompts
 
+def model_detection_error_hint(path, state_dict):
+    filename = os.path.basename(path)
+    if 'lora' in filename.lower():
+        return "\nHINT: This seems to be a Lora file and Lora files should be put in the lora folder and loaded with a lora loader node.."
+    return ""
+
+def load_diffusion_model(unet_path, model_options={}, disable_dynamic=False):
+    with UnifiedSafetensorsLoader(unet_path, low_memory=True) as loader:
+        metadata = loader._read_header()
+        sd = loader.load_all()
+    model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
+    if model is None:
+        logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
+        raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
+    model.cached_patcher_init = (load_diffusion_model, (unet_path, model_options))
+    return model
 
 def round_to_nearest(n, m):
     return int((n + (m / 2)) // m) * m
@@ -2997,7 +3016,7 @@ class TagNormalizeCombine(io.ComfyNode):
 
 class RandInt(io.ComfyNode):
     @classmethod
-    def define_schema(cls):
+    def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="PrimitiveRandomInt",
             display_name="RandomInt",
@@ -3015,7 +3034,7 @@ class RandInt(io.ComfyNode):
 
 class StaticInt(io.ComfyNode):
     @classmethod
-    def define_schema(cls):
+    def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="PrimitiveStaticInt",
             display_name="StaticInt",
@@ -3033,7 +3052,7 @@ class StaticInt(io.ComfyNode):
 
 class RandIntRange(io.ComfyNode):
     @classmethod
-    def define_schema(cls):
+    def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="PrimitiveRandomIntRange",
             display_name="RandomIntRange",
@@ -3050,6 +3069,39 @@ class RandIntRange(io.ComfyNode):
     def execute(cls, min: int, max: int, seed: int) -> io.NodeOutput:
         rng = random.Random(seed)
         return io.NodeOutput(rng.randint(min, max))
+
+class UNETLoaderAsync(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UNETLoaderAsync",
+            display_name="Load Diffusion Model (Async)",
+            category="advanced/model",
+            inputs=[
+                io.Combo.Input("unet_name", folder_paths.get_filename_list("diffusion_models"), tooltip="Select a UNET model to load."),
+                io.Combo.Input("weight_dtype", options=["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"], advanced=True),
+                io.Boolean.Input("disable_dynamic_vram", default=True, advanced=True, tooltip="If true, disables dynamic VRAM optimizations when loading the UNET. This can reduce VRAM usage at the cost of potentially higher CPU usage and slower performance. Recommended to keep enabled unless you are experiencing VRAM-related issues with certain models.")
+            ],
+            outputs=[
+                io.Model.Output(display_name="model"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, unet_name: str, weight_dtype: str, disable_dynamic_vram: bool) -> io.NodeOutput:
+         # Placeholder for actual UNET loading logic
+        model_options = {}
+        if weight_dtype == "fp8_e4m3fn":
+            model_options["dtype"] = torch.float8_e4m3fn
+        elif weight_dtype == "fp8_e4m3fn_fast":
+            model_options["dtype"] = torch.float8_e4m3fn
+            model_options["fp8_optimizations"] = True
+        elif weight_dtype == "fp8_e5m2":
+            model_options["dtype"] = torch.float8_e5m2
+
+        unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
+        model = load_diffusion_model(unet_path, model_options=model_options, disable_dynamic=disable_dynamic_vram)
+        return io.NodeOutput(model)
 
 
 class SamplingUtils(ComfyExtension):
@@ -3096,6 +3148,7 @@ class SamplingUtils(ComfyExtension):
             RandInt,
             StaticInt,
             RandIntRange,
+            UNETLoaderAsync,
         ]
 
 
