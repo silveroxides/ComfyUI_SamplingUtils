@@ -31,6 +31,15 @@ from . import edit_target_prompts
 from . import edit_op_prompts
 from . import camera_shot_prompts
 
+RAM_THRESHOLD = 32 * 1024 * 1024 * 1024 # 16 GB
+RAM_FREE_THRESHOLD = 8 * 1024 * 1024 * 1024 # 8 GB
+
+try:
+    from unifiedefficientloader import UnifiedSafetensorsLoader
+    _unifiedefficientloader_available = True
+except ImportError:
+    _unifiedefficientloader_available = False
+
 def model_detection_error_hint(path, state_dict):
     filename = os.path.basename(path)
     if 'lora' in filename.lower():
@@ -38,14 +47,25 @@ def model_detection_error_hint(path, state_dict):
     return ""
 
 def load_diffusion_model(unet_path, model_options={}, disable_dynamic=False):
-    with UnifiedSafetensorsLoader(unet_path, low_memory=True) as loader:
-        metadata = loader._read_header()
-        sd = loader.load_all()
-    model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
-    if model is None:
-        logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
-        raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
-    model.cached_patcher_init = (load_diffusion_model, (unet_path, model_options))
+    total_ram = comfy.model_management.get_total_memory(comfy.model_management.torch.device("cpu"))
+    free_ram = comfy.model_management.get_free_memory(comfy.model_management.torch.device("cpu"))
+    if total_ram < RAM_THRESHOLD or free_ram < RAM_FREE_THRESHOLD or not _unifiedefficientloader_available:
+        sd, metadata = comfy.utils.load_torch_file(unet_path, return_metadata=True)
+        logging.warning("Total and free system RAM is low, falling back to ComfyUI default model loading")
+        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
+        if model is None:
+            logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
+            raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
+        model.cached_patcher_init = (load_diffusion_model, (unet_path, model_options))
+    else:
+        with UnifiedSafetensorsLoader(unet_path, low_memory=True) as loader:
+            metadata = loader._read_header()
+            sd = loader.load_all()
+        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
+        if model is None:
+            logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
+            raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
+        model.cached_patcher_init = (load_diffusion_model, (unet_path, model_options))
     return model
 
 def round_to_nearest(n, m):
