@@ -1369,7 +1369,7 @@ class VLMSysQueryAddPresets(io.ComfyNode):
                 suffix = data.get(f"{preset}_suffix", "")
         except Exception as e:
             print(f"Error executing VLMSysQueryAddPresets: {e}")
-            
+
         return io.NodeOutput(f"{prefix}{text}{suffix}")
 
 
@@ -1580,6 +1580,50 @@ class TextEncodeKleinSystemPrompt(io.ComfyNode):
             )
 
         tokens = clip.tokenize(prompt, llama_template=llama_template)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        return io.NodeOutput(conditioning)
+
+
+class TextEncodeLtxv2SystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="TextEncodeLtxv2SystemPrompt",
+            category="advanced/conditioning",
+            display_name="Text Encode with LTXV 2 System Prompt",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True, default=""),
+                io.Image.Input("image", optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt="", image=None) -> io.NodeOutput:
+        # Build template with string concat (ComfyUI pattern)
+        if image is not None:
+            llama_template = (
+                "<start_of_turn>system\n" + system_prompt + "<end_of_turn>\n"
+                "<start_of_turn>user\n\n<image_soft_token>{}<end_of_turn>\n\n<start_of_turn>model\n"
+            )
+        elif len(system_prompt) > 0:
+            llama_template = (
+                "<start_of_turn>system\n" + system_prompt + "<end_of_turn>\n"
+                "<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
+            )
+        else:
+            llama_template = (
+                "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
+            )
+
+        if image is not None:
+            tokens = clip.tokenize(prompt, llama_template=llama_template, image=image)
+        else:
+            tokens = clip.tokenize(prompt, llama_template=llama_template)
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning)
 
@@ -1997,6 +2041,59 @@ class ImageBlendByMask(io.ComfyNode):
 
         blended_image = simplepil2tensor(out_image)
         return io.NodeOutput(blended_image)
+
+
+class SU_InjectNoiseToLatent(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SU_InjectNoiseToLatent",
+            category="utils/latent",
+            display_name="Inject Noise to Latent SamplingUtils",
+            inputs=[
+                io.Latent.Input("latents"),
+                io.Float.Input("strength", default=0.1, min=0.0, max=200.0, step=0.0001),
+                io.Latent.Input("noise"),
+                io.Boolean.Input("normalize", default=False),
+                io.Boolean.Input("average", default=False),
+                io.Mask.Input("mask", optional=True),
+                io.Float.Input("mix_randn_amount", default=0.0, min=0.0, max=1000.0, step=0.001, optional=True),
+                io.Int.Input("seed", default=123, min=0, max=0xffffffffffffffff, step=1, optional=True),
+            ],
+            outputs=[
+                io.Latent.Output("noised_latents"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+            cls, latents, strength,
+            noise, normalize, average,
+            mix_randn_amount=0, seed=None, mask=None
+        ) -> io.NodeOutput:
+        samples = latents["samples"].clone().cpu()
+        noise = noise["samples"].clone().cpu()
+        if samples.shape != samples.shape:
+            raise ValueError("InjectNoiseToLatent: Latent and noise must have the same shape")
+        if average:
+            noised = (samples + noise) / 2
+        else:
+            noised = samples + noise * strength
+        if normalize:
+            noised = noised / noised.std()
+        if mask is not None:
+            mask = torch.nn.functional.interpolate(mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])), size=(noised.shape[2], noised.shape[3]), mode="bilinear")
+            mask = mask.expand((-1,noised.shape[1],-1,-1))
+            if mask.shape[0] < noised.shape[0]:
+                mask = mask.repeat((noised.shape[0] -1) // mask.shape[0] + 1, 1, 1, 1)[:noised.shape[0]]
+            noised = mask * noised + (1-mask) * samples
+        if mix_randn_amount > 0:
+            if seed is not None:
+                generator = torch.manual_seed(seed)
+                rand_noise = torch.randn(noised.size(), dtype=noised.dtype, layout=noised.layout, generator=generator, device="cpu")
+                noised = noised + (mix_randn_amount * rand_noise)
+
+        return io.NodeOutput({"samples": noised.to(latents["samples"].device)})
 
 
 class FrakturPadNode(io.ComfyNode):
@@ -3135,11 +3232,13 @@ class SamplingUtils(ComfyExtension):
             Image_Color_Noise,
             TextEncodeFlux2SystemPrompt,
             TextEncodeKleinSystemPrompt,
+            TextEncodeLtxv2SystemPrompt,
             TextEncodeZITSystemPrompt,
             TextEncodeZImageThinkPrompt,
             TextEncodeSystemPrompt,
             ModifyMask,
             ImageBlendByMask,
+            SU_InjectNoiseToLatent,
             SystemMessagePresets,
             InstructPromptPresets,
             BonusPromptPresets,
