@@ -3221,6 +3221,143 @@ class UNETLoaderAsync(io.ComfyNode):
         return io.NodeOutput(model)
 
 
+class TextGenerateQwen35SystemPrompt(io.ComfyNode):
+    """
+    TextGenerate variant for Qwen3.5 models with custom system message support.
+    Builds the chat template via string concatenation (never .format()) so any
+    characters in user input — including { } \\ and control sequences — are safe.
+    """
+
+    @classmethod
+    def define_schema(cls):
+        sampling_options = [
+            io.DynamicCombo.Option(
+                key="on",
+                inputs=[
+                    io.Float.Input("temperature", default=0.7, min=0.01, max=2.0, step=0.000001),
+                    io.Int.Input("top_k", default=64, min=0, max=1000),
+                    io.Float.Input("top_p", default=0.95, min=0.0, max=1.0, step=0.01),
+                    io.Float.Input("min_p", default=0.05, min=0.0, max=1.0, step=0.01),
+                    io.Float.Input("repetition_penalty", default=1.05, min=0.0, max=5.0, step=0.01),
+                    io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff),
+                    io.Float.Input("presence_penalty", optional=True, default=0.0, min=0.0, max=5.0, step=0.01),
+                ]
+            ),
+            io.DynamicCombo.Option(
+                key="off",
+                inputs=[]
+            ),
+        ]
+
+        return io.Schema(
+            node_id="TextGenerateQwen35SystemPrompt",
+            display_name="Text Generate Qwen3.5 (System Prompt)",
+            category="advanced/textgen",
+            search_aliases=["LLM", "VLM", "qwen", "qwen35", "system prompt", "textgen"],
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=False, default="",
+                    tooltip="User message. All characters including { } are safe — template uses concatenation not .format()."),
+                io.String.Input("system_message", multiline=True, dynamic_prompts=False, default="",
+                    tooltip="System message injected before the user turn. Leave empty to skip the system block entirely."),
+                io.Image.Input("image", optional=True),
+                io.Int.Input("max_length", default=512, min=1, max=8192),
+                io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
+                io.Boolean.Input("thinking", optional=True, default=False,
+                    tooltip="Enable thinking mode. When False, suppresses thinking with <think>\\n</think>\\n."),
+            ],
+            outputs=[
+                io.String.Output(display_name="generated_text"),
+            ],
+        )
+
+    @classmethod
+    def _build_prompt(cls, prompt: str, system_message: str, has_image: bool, thinking: bool) -> str:
+        """
+        Build the full Qwen3.5 chat-template string using concatenation only.
+        No .format() / %-formatting — user-supplied strings are never interpolated,
+        so { } and any other characters are completely safe.
+
+        Template structure (matches qwen35.py Qwen35ImageTokenizer):
+            [<|im_start|>system\\n{system_message}<|im_end|>\\n]   <- optional
+            <|im_start|>user\\n
+            [<|vision_start|><|image_pad|><|vision_end|>]          <- if image
+            {prompt}<|im_end|>\\n
+            <|im_start|>assistant\\n
+            [<think>\\n</think>\\n]                                  <- if not thinking
+        """
+        result = ""
+
+        # Optional system block
+        if system_message and system_message.strip():
+            result = (
+                "<|im_start|>system\n"
+                + system_message
+                + "<|im_end|>\n"
+            )
+
+        # User block — image token placed before text per qwen35.py:761
+        result += "<|im_start|>user\n"
+        if has_image:
+            result += "<|vision_start|><|image_pad|><|vision_end|>"
+        result += prompt + "<|im_end|>\n"
+
+        # Assistant block
+        result += "<|im_start|>assistant\n"
+
+        # Suppress thinking unless thinking mode requested (matches qwen35.py:784-785)
+        if not thinking:
+            result += "<think>\n</think>\n"
+
+        return result
+
+    @classmethod
+    def execute(cls, clip, prompt, system_message, max_length, sampling_mode,
+                image=None, thinking=False) -> io.NodeOutput:
+
+        formatted_prompt = cls._build_prompt(
+            prompt=prompt,
+            system_message=system_message,
+            has_image=image is not None,
+            thinking=thinking,
+        )
+
+        # skip_template=True because we built the full template ourselves.
+        # The tokenizer detects <|im_start|> prefix and skips its own template (qwen35.py:769).
+        tokens = clip.tokenize(
+            formatted_prompt,
+            image=image,
+            skip_template=True,
+            min_length=1,
+            thinking=thinking,
+        )
+
+        do_sample = sampling_mode.get("sampling_mode") == "on"
+        temperature = sampling_mode.get("temperature", 1.0)
+        top_k = sampling_mode.get("top_k", 50)
+        top_p = sampling_mode.get("top_p", 1.0)
+        min_p = sampling_mode.get("min_p", 0.0)
+        seed = sampling_mode.get("seed", None)
+        repetition_penalty = sampling_mode.get("repetition_penalty", 1.0)
+        presence_penalty = sampling_mode.get("presence_penalty", 0.0)
+
+        generated_ids = clip.generate(
+            tokens,
+            do_sample=do_sample,
+            max_length=max_length,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=presence_penalty,
+            seed=seed,
+        )
+
+        generated_text = clip.decode(generated_ids, skip_special_tokens=True)
+        return io.NodeOutput(generated_text)
+
+
 class SamplingUtils(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -3268,6 +3405,7 @@ class SamplingUtils(ComfyExtension):
             StaticInt,
             RandIntRange,
             UNETLoaderAsync,
+            TextGenerateQwen35SystemPrompt,
         ]
 
 
