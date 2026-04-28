@@ -2073,8 +2073,52 @@ class SU_InjectNoiseToLatent(io.ComfyNode):
         ) -> io.NodeOutput:
         samples = latents["samples"].clone().cpu()
         noise = noise["samples"].clone().cpu()
-        if samples.shape != samples.shape:
-            raise ValueError("InjectNoiseToLatent: Latent and noise must have the same shape")
+
+        # Handle potential 4D vs 5D mismatch (Image vs Video latents)
+        if len(samples.shape) != len(noise.shape):
+            if len(samples.shape) == 5 and len(noise.shape) == 4:
+                # Samples is [B, C, T, H, W], noise is [B, C, H, W]
+                # Unsqueeze noise to [B, C, 1, H, W] to broadcast over T
+                noise = noise.unsqueeze(2)
+            elif len(samples.shape) == 4 and len(noise.shape) == 5:
+                # Samples is [B, C, H, W], noise is [B, C, T, H, W]
+                if noise.shape[2] == 1:
+                    noise = noise.squeeze(2)
+                else:
+                    # Take first frame of noise
+                    noise = noise[:, :, 0, :, :]
+
+        # Match Channels
+        if samples.shape[1] != noise.shape[1]:
+            if noise.shape[1] == 1:
+                noise = noise.expand(-1, samples.shape[1], *([-1] * (len(noise.shape) - 2)))
+            else:
+                # Repeat or truncate channels to match
+                if noise.shape[1] < samples.shape[1]:
+                    noise = noise.repeat(1, (samples.shape[1] // noise.shape[1]) + 1, *([1] * (len(noise.shape) - 2)))
+                noise = noise[:, :samples.shape[1], ...]
+
+        # Match Batch Size
+        if samples.shape[0] != noise.shape[0]:
+            if noise.shape[0] == 1:
+                noise = noise.expand(samples.shape[0], *([-1] * (len(noise.shape) - 1)))
+            else:
+                if noise.shape[0] < samples.shape[0]:
+                    noise = noise.repeat((samples.shape[0] // noise.shape[0]) + 1, *([1] * (len(noise.shape) - 1)))
+                noise = noise[:samples.shape[0], ...]
+
+        # Match Width/Height (Spatial dimensions)
+        if samples.shape[-2:] != noise.shape[-2:]:
+            # Spatial mismatch - resize noise to match samples
+            if len(noise.shape) == 5:
+                # For 5D, we interpolate frame by frame
+                B, C, T, H, W = noise.shape
+                noise = noise.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+                noise = torch.nn.functional.interpolate(noise, size=samples.shape[-2:], mode="bicubic")
+                noise = noise.reshape(B, T, C, *samples.shape[-2:]).permute(0, 2, 1, 3, 4)
+            else:
+                noise = torch.nn.functional.interpolate(noise, size=samples.shape[-2:], mode="bicubic")
+
         if average:
             noised = (samples + noise) / 2
         else:
@@ -2082,10 +2126,18 @@ class SU_InjectNoiseToLatent(io.ComfyNode):
         if normalize:
             noised = noised / noised.std()
         if mask is not None:
-            mask = torch.nn.functional.interpolate(mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])), size=(noised.shape[2], noised.shape[3]), mode="bilinear")
-            mask = mask.expand((-1,noised.shape[1],-1,-1))
+            # Match mask to spatial dimensions [H, W]
+            mask = torch.nn.functional.interpolate(mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])), size=(noised.shape[-2], noised.shape[-1]), mode="bilinear")
+
+            if len(noised.shape) == 5:
+                # mask is [B, 1, H, W], expand to [B, C, T, H, W]
+                mask = mask.unsqueeze(2).expand((-1, noised.shape[1], noised.shape[2], -1, -1))
+            else:
+                # mask is [B, 1, H, W], expand to [B, C, H, W]
+                mask = mask.expand((-1, noised.shape[1], -1, -1))
+
             if mask.shape[0] < noised.shape[0]:
-                mask = mask.repeat((noised.shape[0] -1) // mask.shape[0] + 1, 1, 1, 1)[:noised.shape[0]]
+                mask = mask.repeat((noised.shape[0] - 1) // mask.shape[0] + 1, *([1] * (len(mask.shape) - 1)))[:noised.shape[0]]
             noised = mask * noised + (1-mask) * samples
         if mix_randn_amount > 0:
             if seed is not None:
