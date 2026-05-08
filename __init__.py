@@ -298,6 +298,67 @@ def unfrakturpad(text: str) -> str:
     text_without_joiners = remove_joiners(text)
     return from_bold_fraktur(text_without_joiners)
 
+
+def to_video_prompt(text: str, is_system: bool = False) -> str:
+    """
+    Transform image-based prompt presets into video-based ones by replacing
+    static constraints with motion-focused directives.
+    """
+    # 1. Replacement Map for standard patterns (ordered by specificity)
+    replacements = [
+        # Complex Multi-phrase constraints
+        (r"(?i)(?:Keep|Maintain|Ensure)\s+subject\s+position\s+and\s+their\s+pose\s+the\s+same\s+as\s+the\s+reference", "Maintain character consistency with natural lifelike motion"),
+        (r"(?i)(?:Make\s+sure|Ensure)\s+the\s+subject\s+is\s+in\s+the\s+same\s+position", "Ensure the subject moves naturally within the environment"),
+        (r"(?i)keeping\s+the\s+composition\s+and\s+structure\s+of\s+the\s+image\s+same\s+as\s+reference", "maintaining character consistency and cinematic flow"),
+        (r"(?i)not\s+changing\s+the\s+positioning\s+of\s+subjects\s+in\s+image", "enabling dynamic character movement and large actions"),
+        (r"(?i)strictly\s+maintaining\s+their\s+original\s+appearance", "preserving visual identity during dynamic motion"),
+
+        # Simple Constraints -> Motion
+        (r"(?i)Keep\s+pose", "Fluid movement and dynamic posing"),
+        (r"(?i)Keep\s+angle", "Cinematic camera pans and motion"),
+        (r"(?i)Keep\s+viewing\s+direction", "Dynamic gaze and perspective shifts"),
+        (r"(?i)Keep\s+eyes", "Expressive eye movement and blinking"),
+        (r"(?i)Keep\s+in\s+focus", "Maintain sharp cinematic focus"),
+        (r"(?i)Keep\s+body\s+color", "Maintain consistent color during motion"),
+
+        # Verb/Directive Transformation
+        (r"(?i)Modify\s+(?:any\s+subjects'\s+appearance|the\s+scene)\s+to\s+(?:match\s+|look\s+like\s+|show\s+)?(.*?)(?:\.(?:\s|$)|$)", r"Animate with motion and physics authentic to \1. "),
+        (r"(?i)focuses\s+on\s+edits\s+to\s+look\s+like\s+", "focuses on generating high-quality motion authentic to "),
+        (r"(?i)modify\s+the\s+style\s+to\s+look\s+like\s+", "animate with motion and physics authentic to "),
+        (r"(?i)image\s+editing\s+descriptions", "cinematic motion and video generation descriptions"),
+        (r"(?i)keeping\s+the\s+structure\s+of\s+the\s+image\s+intact", "maintaining cinematic continuity"),
+
+        # Nouns (Medium Swaps)
+        (r"(?i)\bimage\b", "video"),
+        (r"(?i)\bphotograph\b", "cinematic video"),
+        (r"(?i)\bphotography\b", "cinematography"),
+        (r"(?i)\bphoto\b", "video"),
+        (r"(?i)\bstill\b", "video clip"),
+        (r"(?i)\bscreenshot\b", "video clip"),
+        (r"(?i)\bframe\b", "motion clip"),
+        (r"(?i)\bcel\b", "animation frame"),
+        (r"(?i)\bdrawing\b", "animation"),
+        (r"(?i)\bpainting\b", "animated sequence"),
+        (r"(?i)\billustration\b", "animated sequence"),
+        (r"(?i)\bartwork\b", "animated sequence"),
+    ]
+
+
+    result = text
+    for pattern, replacement in replacements:
+        result = re.sub(pattern, replacement, result)
+
+    # Cleanup extra whitespace and broken punctuation
+    result = re.sub(r"\s+", " ", result)
+    result = re.sub(r"\.\s*\.", ".", result)
+    result = result.strip()
+
+    if is_system:
+        prefix = "Analyze cinematic information and dynamic potential. Describe action as if already in motion, focusing on large motions and style-appropriate physics. "
+        result = prefix + result
+
+    return result
+
 def _hex_to_rgb(hex_str: str, default=(255, 255, 255)):
     hex_str = hex_str.lstrip('#')
     try:
@@ -1165,6 +1226,99 @@ class BonusPromptPresets(io.ComfyNode):
         presets_dict = cls.get_presets()
         bonus_prompt = presets_dict.get(preset, "")
         return io.NodeOutput(bonus_prompt)
+
+
+class SystemMessageVideoPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        return SystemMessagePresets.get_presets()
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="SystemMessageVideoPresets",
+            category="advanced/text",
+            display_name="System Message Video Presets",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default="F2_SYSTEM_MESSAGE" if "F2_SYSTEM_MESSAGE" in presets else sorted(list(presets.keys()))[0],
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="system_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        system_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(to_video_prompt(system_prompt, is_system=True))
+
+
+class InstructPromptVideoPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        return InstructPromptPresets.get_presets()
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="InstructPromptVideoPresets",
+            category="advanced/text",
+            display_name="Instruct Prompt Video Presets",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default=sorted(list(presets.keys()))[0] if presets else "",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="instruct_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        instruct_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(to_video_prompt(instruct_prompt))
+
+
+class BonusPromptVideoPresets(io.ComfyNode):
+    @classmethod
+    def get_presets(cls):
+        return BonusPromptPresets.get_presets()
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        return io.Schema(
+            node_id="BonusPromptVideoPresets",
+            category="advanced/text",
+            display_name="Bonus Prompt Video Presets",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    options=sorted(list(presets.keys())),
+                    default=sorted(list(presets.keys()))[0] if presets else "",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="bonus_prompt"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        bonus_prompt = presets_dict.get(preset, "")
+        return io.NodeOutput(to_video_prompt(bonus_prompt))
 
 
 class EditTargetPresets(io.ComfyNode):
@@ -3598,8 +3752,11 @@ class SamplingUtils(ComfyExtension):
             ImageBlendByMask,
             SU_InjectNoiseToLatent,
             SystemMessagePresets,
+            SystemMessageVideoPresets,
             InstructPromptPresets,
+            InstructPromptVideoPresets,
             BonusPromptPresets,
+            BonusPromptVideoPresets,
             EditTargetPresets,
             EditOpPresets,
             CameraShotPresets,
