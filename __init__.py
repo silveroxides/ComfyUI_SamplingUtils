@@ -677,6 +677,26 @@ def _composite(original_np: np.ndarray,
     return result, composite_mask, stats
 
 
+def get_token_count(clip, text):
+    """
+    Robustly tokenizes a text segment and returns the number of its content tokens.
+    """
+    if not text:
+        return 0
+
+    tokens = clip.tokenize(text)
+
+    max_content_len = 0
+    for key in tokens:
+        if len(tokens[key]) > 0 and len(tokens[key][0]) > 0:
+
+            content_len = len(tokens[key][0]) - 2
+            if content_len > max_content_len:
+                max_content_len = content_len
+
+    return max(0, max_content_len)
+
+
 class LlamaTokenizerOptions(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -1662,6 +1682,175 @@ class UnifiedPresets(io.ComfyNode):
         """Forward the selected preset as 'any' type"""
         return io.NodeOutput(preset)
 
+
+class MultiTypeDemo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="MultiTypeDemo",
+            display_name="Multi-Type Demo (Primitive)",
+            category="advanced/primitives",
+            inputs=[
+                io.MultiType.Input(
+                    "type_list",
+                    types=[io.String, io.Int, io.Float],
+                    tooltip="Demo input that can accept multiple types. Output will just forward the value regardless of type.",
+                ),
+            ],
+            outputs=[
+                io.AnyType.Output(display_name="output", is_output_list=True),
+            ],
+        )
+    @classmethod
+    def execute(cls, type_list) -> io.NodeOutput:
+        """Simply forward the input value as output, demonstrating multi-type handling."""
+        if type_list[0] is not None:
+            assert isinstance(type_list[0], str), f"Expected string type for first input, got {type(type_list[0])}"
+            input_string = type_list[0]
+        else:
+            input_string = ""
+        if type_list[1] is not None:
+            assert isinstance(type_list[1], int), f"Expected int type for second input, got {type(type_list[1])}"
+            input_int = type_list[1]
+        else:
+            input_int = 0
+        if type_list[2] is not None:
+            assert isinstance(type_list[2], float), f"Expected float type for third input, got {type(type_list[2])}"
+            input_float = type_list[2]
+        else:
+            input_float = 0.0
+
+        return io.NodeOutput([input_string, input_int, input_float])
+
+
+class AnyList(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        autogrow_template = io.Autogrow.TemplatePrefix(
+            io.AnyType.Input("input"),
+            prefix="input",
+            min=1,
+            max=100
+        )
+        return io.Schema(
+            node_id="AnyList",
+            display_name="Any List (Primitive)",
+            category="advanced",
+            inputs=[
+                io.Autogrow.Input(
+                    "input",
+                    template=autogrow_template,
+                    tooltip="Add items of any type. The list will grow to accommodate all items added."
+                ),
+            ],
+            outputs=[
+                io.AnyType.Output(display_name="output"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, input) -> io.NodeOutput:
+        """Simply forward the input list as output, demonstrating autogrow list creation."""
+        # Convert dict to list of values (autogrow inputs come as dict with keys like "input0", "input1", etc)
+        items = list(input.values()) if isinstance(input, dict) else input
+        print(f"Received list with {len(items)} items. Item types:")
+        output = []
+        for item in items:
+            output += [item] if not isinstance(item, list) else item
+        return io.NodeOutput(output)
+
+
+class AttentionBiasTextEncode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="AttentionBiasTextEncode",
+            category="advanced/conditioning",
+            display_name="CLIP Text Encode with Attention Bias (Experimental)",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("text", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="conditioning"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, clip, text) -> io.NodeOutput:
+        if clip is None:
+            raise RuntimeError("ERROR: clip input is invalid: None\n\nIf the clip is from a checkpoint loader node your checkpoint does not contain a valid clip or text encoder model.")
+
+        if '<' not in text and '>' not in text and '=' not in text:
+            tokens = clip.tokenize(text)
+            cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+            return ([[cond, {"pooled_output": pooled}]], )
+
+        bias_pattern = re.compile(r"<([^>]+)=([0-9.-]+)>")
+        split_pattern = re.compile(r"(<[^>]+=[0-9.-]+>)")
+        segments = split_pattern.split(text)
+
+        clean_text = ""
+        biases_to_apply = []
+
+        current_token_index = 1
+
+        for segment in segments:
+            if not segment:
+                continue
+
+            match = bias_pattern.fullmatch(segment)
+            if match:
+                bias_text, strength_str = match.groups()
+                strength = float(strength_str)
+                clean_text += bias_text
+                num_tokens = get_token_count(clip, bias_text)
+
+                if num_tokens > 0:
+                    start_index = current_token_index
+                    end_index = current_token_index + num_tokens
+                    biases_to_apply.append({"start": start_index, "end": end_index, "strength": strength})
+
+                current_token_index += num_tokens
+            else:
+                clean_text += segment
+                num_tokens = get_token_count(clip, segment)
+                current_token_index += num_tokens
+
+        tokens = clip.tokenize(clean_text)
+        cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+
+        if not biases_to_apply:
+            return io.NodeOutput([[cond, {"pooled_output": pooled}]])
+
+        cond_dict = {"pooled_output": pooled}
+        n_text_tokens = cond.shape[1]
+        device = cond.device
+        dtype = torch.float16
+
+
+        final_seq_len = n_text_tokens + 1
+        attn_mask = torch.zeros((1, final_seq_len, final_seq_len), dtype=dtype, device=device)
+
+        pooled_offset = 1
+
+        for bias in biases_to_apply:
+            strength = bias["strength"]
+            attn_bias_value = torch.log(torch.tensor(strength, dtype=dtype, device=device))
+
+            start = min(bias["start"] + pooled_offset, final_seq_len)
+            end = min(bias["end"] + pooled_offset, final_seq_len)
+
+            if start >= end:
+                continue
+
+            attn_mask[:, :, start:end] += attn_bias_value
+            attn_mask[:, start:end, :] += attn_bias_value
+
+        cond_dict["attention_mask"] = attn_mask
+        cond_dict["attention_mask_img_shape"] = (1, 1)
+
+        return io.NodeOutput([[cond, cond_dict]])
 
 class TextEncodeFlux2SystemPrompt(io.ComfyNode):
     @classmethod
@@ -3764,6 +3953,9 @@ class SamplingUtils(ComfyExtension):
             VLMSysQueryAddPresets,
             VLMSysInstrAdvPresets,
             UnifiedPresets,
+            MultiTypeDemo,
+            AnyList,
+            AttentionBiasTextEncode,
             FrakturPadNode,
             UnFrakturPadNode,
             JoinerPadding,
