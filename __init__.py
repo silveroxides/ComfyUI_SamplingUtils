@@ -1781,7 +1781,7 @@ class AttentionBiasTextEncode(io.ComfyNode):
         if clip is None:
             raise RuntimeError("ERROR: clip input is invalid: None\n\nIf the clip is from a checkpoint loader node your checkpoint does not contain a valid clip or text encoder model.")
 
-        if '<' not in text and '>' not in text and '=' not in text:
+        if "<" not in text and ">" not in text and "=" not in text:
             tokens = clip.tokenize(text)
             cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
             return ([[cond, {"pooled_output": pooled}]], )
@@ -1851,6 +1851,325 @@ class AttentionBiasTextEncode(io.ComfyNode):
         cond_dict["attention_mask_img_shape"] = (1, 1)
 
         return io.NodeOutput([[cond, cond_dict]])
+
+def encode_attention_bias(clip, text, llama_template=None, **kwargs):
+    if clip is None:
+        raise RuntimeError("ERROR: clip input is invalid: None\n\nIf the clip is from a checkpoint loader node your checkpoint does not contain a valid clip or text encoder model.")
+
+    if "<" not in text and ">" not in text and "=" not in text:
+        tokens = clip.tokenize(text, llama_template=llama_template, **kwargs)
+        return clip.encode_from_tokens_scheduled(tokens)
+
+    bias_pattern = re.compile(r"<([^>]+)=([0-9.-]+)>")
+    split_pattern = re.compile(r"(<[^>]+=[0-9.-]+>)")
+    segments = split_pattern.split(text)
+
+    clean_text = ""
+    biases_to_apply = []
+
+    # Calculate offset if template is used
+    offset = 1 # Start token [CLS]
+    if llama_template:
+        prefix = llama_template.split("{}")[0]
+        if prefix:
+            offset += get_token_count(clip, prefix)
+
+    current_token_index = offset
+
+    for segment in segments:
+        if not segment:
+            continue
+
+        match = bias_pattern.fullmatch(segment)
+        if match:
+            bias_text, strength_str = match.groups()
+            strength = float(strength_str)
+            clean_text += bias_text
+            num_tokens = get_token_count(clip, bias_text)
+
+            if num_tokens > 0:
+                start_index = current_token_index
+                end_index = current_token_index + num_tokens
+                biases_to_apply.append({"start": start_index, "end": end_index, "strength": strength})
+
+            current_token_index += num_tokens
+        else:
+            clean_text += segment
+            num_tokens = get_token_count(clip, segment)
+            current_token_index += num_tokens
+
+    tokens = clip.tokenize(clean_text, llama_template=llama_template, **kwargs)
+    conditioning = clip.encode_from_tokens_scheduled(tokens)
+
+    if not biases_to_apply:
+        return conditioning
+
+    # Apply mask to each schedule in conditioning
+    new_conditioning = []
+    for i in range(len(conditioning)):
+        cond, cond_dict = conditioning[i]
+
+        n_text_tokens = cond.shape[1]
+        device = cond.device
+        dtype = torch.float16 # Standard for attention mask in Flux/SDXL
+
+        final_seq_len = n_text_tokens + 1 # +1 for pooled/extra token logic matching AttentionBiasTextEncode
+        attn_mask = torch.zeros((1, final_seq_len, final_seq_len), dtype=dtype, device=device)
+
+        pooled_offset = 1 # Match existing node's logic
+
+        for bias in biases_to_apply:
+            strength = bias["strength"]
+            # Avoid log(0) or negative
+            s_val = max(1e-6, strength)
+            attn_bias_value = torch.log(torch.tensor(s_val, dtype=dtype, device=device))
+
+            start = min(bias["start"] + pooled_offset, final_seq_len)
+            end = min(bias["end"] + pooled_offset, final_seq_len)
+
+            if start >= end:
+                continue
+
+            attn_mask[:, :, start:end] += attn_bias_value
+            attn_mask[:, start:end, :] += attn_bias_value
+
+        # Clone dict to avoid modifying shared dicts if multiple schedules share one
+        new_cond_dict = cond_dict.copy()
+        new_cond_dict["attention_mask"] = attn_mask
+        new_cond_dict["attention_mask_img_shape"] = (1, 1)
+        new_conditioning.append([cond, new_cond_dict])
+
+    return new_conditioning
+
+class AttentionBiasTextEncodeFlux2SystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AttentionBiasTextEncodeFlux2SystemPrompt",
+            category="advanced/conditioning",
+            display_name="Text Encode with Flux2 dev System Prompt (Attention Bias)",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
+        if len(system_prompt) > 0:
+            template_prefix = r"[SYSTEM_PROMPT]"
+            template_suffix = r"[/SYSTEM_PROMPT][INST]{}[/INST]"
+            llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
+            conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+        else:
+            conditioning = encode_attention_bias(clip, prompt)
+
+        return io.NodeOutput(conditioning)
+
+
+class AttentionBiasTextEncodeKleinSystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AttentionBiasTextEncodeKleinSystemPrompt",
+            category="advanced/conditioning",
+            display_name="Text Encode with Flux2 Klein System Prompt (Attention Bias)",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True, default=""),
+                io.String.Input(
+                    "thinking_content",
+                    multiline=True,
+                    dynamic_prompts=True,
+                    default="",
+                    tooltip="Custom thinking content to inject. Leave empty for default.",
+                ),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt="", thinking_content="") -> io.NodeOutput:
+        # Build template with string concat (ComfyUI pattern)
+        if len(system_prompt) > 0:
+            llama_template = (
+                "<|im_start|>system\n" + system_prompt + "<|im_end|>\n"
+                "<|im_start|>user\n{}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
+            )
+        else:
+            llama_template = (
+                "<|im_start|>user\n{}<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
+            )
+
+        conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+        return io.NodeOutput(conditioning)
+
+
+class AttentionBiasTextEncodeLtxv2SystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AttentionBiasTextEncodeLtxv2SystemPrompt",
+            category="advanced/conditioning",
+            display_name="Text Encode with LTXV 2 System Prompt (Attention Bias)",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True, default=""),
+                io.Image.Input("image", optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt="", image=None) -> io.NodeOutput:
+        # Build template with string concat (ComfyUI pattern)
+        if image is not None:
+            llama_template = (
+                "<start_of_turn>system\n" + system_prompt + "<end_of_turn>\n"
+                "<start_of_turn>user\n\n<image_soft_token>{}<end_of_turn>\n\n<start_of_turn>model\n"
+            )
+        elif len(system_prompt) > 0:
+            llama_template = (
+                "<start_of_turn>system\n" + system_prompt + "<end_of_turn>\n"
+                "<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
+            )
+        else:
+            llama_template = (
+                "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
+            )
+
+        conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template, image=image)
+        return io.NodeOutput(conditioning)
+
+
+class AttentionBiasTextEncodeZITSystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AttentionBiasTextEncodeZITSystemPrompt",
+            category="advanced/conditioning",
+            display_name="Text Encode with Z-Image System Prompt (Attention Bias)",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, system_prompt=None) -> io.NodeOutput:
+        if len(system_prompt) > 0:
+            template_prefix = "<|im_start|>system\n"
+            template_suffix = (
+                "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+            )
+            llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
+            conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+        else:
+            conditioning = encode_attention_bias(clip, prompt)
+
+        return io.NodeOutput(conditioning)
+
+
+class AttentionBiasTextEncodeZImageThinkPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AttentionBiasTextEncodeZImageThinkPrompt",
+            category="advanced/conditioning",
+            display_name="Text Encode with Z-Image Thinking Prompt (Attention Bias)",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("thinking", multiline=True, dynamic_prompts=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, prompt, thinking=None) -> io.NodeOutput:
+        if len(thinking) > 0:
+            template_prefix = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            template_suffix = "\n</think>\n\n"
+            llama_template = f"{template_prefix}{thinking}{template_suffix}"
+            conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+        else:
+            conditioning = encode_attention_bias(clip, prompt)
+
+        return io.NodeOutput(conditioning)
+
+
+class AttentionBiasTextEncodeSystemPrompt(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AttentionBiasTextEncodeSystemPrompt",
+            category="advanced/conditioning",
+            display_name="Text Encode System Prompt (Attention Bias)",
+            inputs=[
+                io.Clip.Input("clip"),
+                io.Combo.Input(
+                    "model_type",
+                    options=["flux2dev", "klein", "z-image"],
+                    default="flux2dev",
+                    tooltip="Select the model type to use the correct template format.",
+                ),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True),
+                io.String.Input("system_prompt", multiline=True, dynamic_prompts=True, default=""),
+                io.String.Input(
+                    "thinking_content",
+                    multiline=True,
+                    dynamic_prompts=True,
+                    default="",
+                    tooltip="(Klein only) Custom thinking content to inject. Leave empty for default.",
+                ),
+            ],
+            outputs=[
+                io.Conditioning.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, clip, model_type, prompt, system_prompt="", thinking_content="") -> io.NodeOutput:
+        if model_type == "klein" and len(thinking_content) > 0:
+            # Klein with custom thinking content
+            if len(system_prompt) > 0:
+                llama_template = (
+                    f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+                    f"<|im_start|>user\n{{}}<|im_end|>\n"
+                    f"<|im_start|>assistant\n<think>\n{thinking_content}\n</think>\n\n"
+                )
+            else:
+                llama_template = (
+                    "<|im_start|>user\n{}<|im_end|>\n"
+                    f"<|im_start|>assistant\n<think>\n{thinking_content}\n</think>\n\n"
+                )
+        elif len(system_prompt) > 0:
+            template = SYSTEM_PROMPT_TEMPLATES.get(model_type, SYSTEM_PROMPT_TEMPLATES["flux2dev"])
+            llama_template = f"{template['prefix']}{system_prompt}{template['suffix']}"
+        else:
+            llama_template = None
+
+        conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+        return io.NodeOutput(conditioning)
+
 
 class TextEncodeFlux2SystemPrompt(io.ComfyNode):
     @classmethod
@@ -3937,6 +4256,12 @@ class SamplingUtils(ComfyExtension):
             TextEncodeZITSystemPrompt,
             TextEncodeZImageThinkPrompt,
             TextEncodeSystemPrompt,
+            AttentionBiasTextEncodeFlux2SystemPrompt,
+            AttentionBiasTextEncodeKleinSystemPrompt,
+            AttentionBiasTextEncodeLtxv2SystemPrompt,
+            AttentionBiasTextEncodeZITSystemPrompt,
+            AttentionBiasTextEncodeZImageThinkPrompt,
+            AttentionBiasTextEncodeSystemPrompt,
             ModifyMask,
             ImageBlendByMask,
             SU_InjectNoiseToLatent,
