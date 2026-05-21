@@ -677,20 +677,56 @@ def _composite(original_np: np.ndarray,
     return result, composite_mask, stats
 
 
-def get_token_count(clip, text):
+def get_token_count(clip, text, **kwargs):
     """
     Robustly tokenizes a text segment and returns the number of its content tokens.
+    Calculates true length by ignoring padding tokens added by fixed-length tokenizers (like Qwen3).
     """
-    if not text:
+    # Only return 0 if no text AND no llama_template (which adds tokens)
+    if not text and not kwargs.get("llama_template"):
         return 0
 
-    tokens = clip.tokenize(text)
+    tokens = clip.tokenize(text, **kwargs)
 
     max_content_len = 0
     for key in tokens:
         if len(tokens[key]) > 0 and len(tokens[key][0]) > 0:
+            token_list = tokens[key][0]
 
-            content_len = len(tokens[key][0]) - 2
+            # Count tokens that aren't padding.
+            # In ComfyUI, padding tokens are usually 0 or the end-of-text token repeated.
+            # We find the first occurrence of the end-of-text token or look for the padding.
+
+            # For robust counting across models:
+            # 1. Start with the full length
+            # 2. Subtract 2 (for start and end tokens)
+            # 3. If the length is still suspiciously large (like 510 or 254),
+            #    it's likely a padded tokenizer. We try to find the actual content.
+
+            raw_len = len(token_list)
+            content_len = raw_len - 2
+
+            # If it looks like a fixed-length padded result (common for T5/Qwen in ComfyUI)
+            if raw_len >= 77:
+                # Find the actual used length.
+                # Most tokenizers pad with 0 or the last token (EOS).
+                if isinstance(token_list, torch.Tensor):
+                    ids = token_list.tolist()
+                else:
+                    ids = token_list
+
+                # Qwen/Llama usually have a start token at 0.
+                # Let's count how many IDs are actually distinct from the last token in the list
+                # (which is usually the padding token)
+                pad_id = ids[-1]
+                actual_count = 0
+                for i in range(1, len(ids) - 1): # Skip start token at 0 and end token
+                    if ids[i] != pad_id:
+                        actual_count += 1
+                    else:
+                        break # Hit padding
+                content_len = actual_count
+
             if content_len > max_content_len:
                 max_content_len = content_len
 
@@ -1804,7 +1840,7 @@ class AttentionBiasTextEncode(io.ComfyNode):
                 bias_text, strength_str = match.groups()
                 strength = float(strength_str)
                 clean_text += bias_text
-                num_tokens = get_token_count(clip, bias_text)
+                num_tokens = get_token_count(clip, bias_text, llama_template="{}")
 
                 if num_tokens > 0:
                     start_index = current_token_index
@@ -1814,45 +1850,64 @@ class AttentionBiasTextEncode(io.ComfyNode):
                 current_token_index += num_tokens
             else:
                 clean_text += segment
-                num_tokens = get_token_count(clip, segment)
+                num_tokens = get_token_count(clip, segment, llama_template="{}")
                 current_token_index += num_tokens
 
         tokens = clip.tokenize(clean_text)
-        cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+        conditioning = clip.encode_from_tokens_scheduled(tokens)
 
         if not biases_to_apply:
-            return io.NodeOutput([[cond, {"pooled_output": pooled}]])
+            return io.NodeOutput(conditioning)
 
-        cond_dict = {"pooled_output": pooled}
-        n_text_tokens = cond.shape[1]
-        device = cond.device
-        dtype = torch.float16
+        new_conditioning = []
+        for i in range(len(conditioning)):
+            cond, cond_dict = conditioning[i]
+            n_text_tokens = cond.shape[1]
+            device = cond.device
+            dtype = torch.float16
 
+            final_seq_len = n_text_tokens + 1
+            attn_mask = torch.zeros((1, final_seq_len, final_seq_len), dtype=dtype, device=device)
 
-        final_seq_len = n_text_tokens + 1
-        attn_mask = torch.zeros((1, final_seq_len, final_seq_len), dtype=dtype, device=device)
+            pooled_offset = 1
 
-        pooled_offset = 1
+            for bias in biases_to_apply:
+                strength = bias["strength"]
+                s_val = max(1e-6, strength)
+                attn_bias_value = torch.log(torch.tensor(s_val, dtype=dtype, device=device))
 
-        for bias in biases_to_apply:
-            strength = bias["strength"]
-            attn_bias_value = torch.log(torch.tensor(strength, dtype=dtype, device=device))
+                start = min(bias["start"] + pooled_offset, final_seq_len)
+                end = min(bias["end"] + pooled_offset, final_seq_len)
 
-            start = min(bias["start"] + pooled_offset, final_seq_len)
-            end = min(bias["end"] + pooled_offset, final_seq_len)
+                if start >= end:
+                    continue
 
-            if start >= end:
-                continue
+                attn_mask[:, :, start:end] += attn_bias_value
+                attn_mask[:, start:end, :] += attn_bias_value
 
-            attn_mask[:, :, start:end] += attn_bias_value
-            attn_mask[:, start:end, :] += attn_bias_value
+            new_cond_dict = cond_dict.copy()
 
-        cond_dict["attention_mask"] = attn_mask
-        cond_dict["attention_mask_img_shape"] = (1, 1)
+            if "attention_mask" in cond_dict and cond_dict["attention_mask"] is not None:
+                base_mask = cond_dict["attention_mask"]
+                base_mask_float = torch.zeros_like(base_mask, dtype=dtype)
+                base_mask_float = base_mask_float.masked_fill(base_mask == 0, -10000.0)
 
-        return io.NodeOutput([[cond, cond_dict]])
+                expanded_base_mask = base_mask_float.unsqueeze(1) + base_mask_float.unsqueeze(2)
 
-def encode_attention_bias(clip, text, llama_template=None, **kwargs):
+                if expanded_base_mask.shape[-1] < final_seq_len:
+                    diff = final_seq_len - expanded_base_mask.shape[-1]
+                    expanded_base_mask = torch.nn.functional.pad(expanded_base_mask, (0, diff, 0, diff), value=0.0)
+
+                new_cond_dict["attention_mask"] = expanded_base_mask + attn_mask
+            else:
+                new_cond_dict["attention_mask"] = attn_mask
+
+            new_cond_dict["attention_mask_img_shape"] = (1, 1)
+            new_conditioning.append([cond, new_cond_dict])
+
+        return io.NodeOutput(new_conditioning)
+
+def encode_embedding_scaled_bias(clip, text, llama_template=None, **kwargs):
     if clip is None:
         raise RuntimeError("ERROR: clip input is invalid: None\n\nIf the clip is from a checkpoint loader node your checkpoint does not contain a valid clip or text encoder model.")
 
@@ -1860,21 +1915,18 @@ def encode_attention_bias(clip, text, llama_template=None, **kwargs):
         tokens = clip.tokenize(text, llama_template=llama_template, **kwargs)
         return clip.encode_from_tokens_scheduled(tokens)
 
-    bias_pattern = re.compile(r"<([^>]+)=([0-9.-]+)>")
-    split_pattern = re.compile(r"(<[^>]+=[0-9.-]+>)")
+    # Permissive regex for whitespace inside tags
+    bias_pattern = re.compile(r"<\s*([^>=]+?)\s*=\s*([0-9.-]+)\s*>")
+    split_pattern = re.compile(r"(<\s*[^>=]+?\s*=\s*[0-9.-]+\s*>)")
     segments = split_pattern.split(text)
 
     clean_text = ""
     biases_to_apply = []
 
-    # Calculate offset if template is used
-    offset = 1 # Start token [CLS]
+    # Use prefix-only template for measurements to avoid suffix-induced shifts
+    prefix_template = "{}"
     if llama_template:
-        prefix = llama_template.split("{}")[0]
-        if prefix:
-            offset += get_token_count(clip, prefix)
-
-    current_token_index = offset
+        prefix_template = llama_template.split("{}")[0] + "{}"
 
     for segment in segments:
         if not segment:
@@ -1882,21 +1934,22 @@ def encode_attention_bias(clip, text, llama_template=None, **kwargs):
 
         match = bias_pattern.fullmatch(segment)
         if match:
+            # Count before adding biased segment
+            start_count = get_token_count(clip, clean_text, llama_template=prefix_template)
+
             bias_text, strength_str = match.groups()
-            strength = float(strength_str)
             clean_text += bias_text
-            num_tokens = get_token_count(clip, bias_text)
 
-            if num_tokens > 0:
-                start_index = current_token_index
-                end_index = current_token_index + num_tokens
-                biases_to_apply.append({"start": start_index, "end": end_index, "strength": strength})
+            # Count after adding biased segment
+            end_count = get_token_count(clip, clean_text, llama_template=prefix_template)
 
-            current_token_index += num_tokens
+            if end_count > start_count:
+                # BOS is at index 0, so tokens are at indices 1 to count
+                start_index = 1 + start_count
+                end_index = 1 + end_count
+                biases_to_apply.append({"start": start_index, "end": end_index, "strength": float(strength_str)})
         else:
             clean_text += segment
-            num_tokens = get_token_count(clip, segment)
-            current_token_index += num_tokens
 
     tokens = clip.tokenize(clean_text, llama_template=llama_template, **kwargs)
     conditioning = clip.encode_from_tokens_scheduled(tokens)
@@ -1904,50 +1957,43 @@ def encode_attention_bias(clip, text, llama_template=None, **kwargs):
     if not biases_to_apply:
         return conditioning
 
-    # Apply mask to each schedule in conditioning
+    # Apply bias scaling directly to each schedule in conditioning
     new_conditioning = []
+    max_strength = 1.0
+    for bias in biases_to_apply:
+        max_strength = max(max_strength, bias["strength"])
+
     for i in range(len(conditioning)):
         cond, cond_dict = conditioning[i]
 
-        n_text_tokens = cond.shape[1]
-        device = cond.device
-        dtype = torch.float16 # Standard for attention mask in Flux/SDXL
-
-        final_seq_len = n_text_tokens + 1 # +1 for pooled/extra token logic matching AttentionBiasTextEncode
-        attn_mask = torch.zeros((1, final_seq_len, final_seq_len), dtype=dtype, device=device)
-
-        pooled_offset = 1 # Match existing node's logic
+        # Directly scale the embeddings for the biased tokens
+        new_cond = cond.clone()
 
         for bias in biases_to_apply:
             strength = bias["strength"]
-            # Avoid log(0) or negative
-            s_val = max(1e-6, strength)
-            attn_bias_value = torch.log(torch.tensor(s_val, dtype=dtype, device=device))
-
-            start = min(bias["start"] + pooled_offset, final_seq_len)
-            end = min(bias["end"] + pooled_offset, final_seq_len)
+            start = min(bias["start"], new_cond.shape[1])
+            end = min(bias["end"], new_cond.shape[1])
 
             if start >= end:
                 continue
 
-            attn_mask[:, :, start:end] += attn_bias_value
-            attn_mask[:, start:end, :] += attn_bias_value
+            new_cond[:, start:end, :] *= strength
 
-        # Clone dict to avoid modifying shared dicts if multiple schedules share one
         new_cond_dict = cond_dict.copy()
-        new_cond_dict["attention_mask"] = attn_mask
-        new_cond_dict["attention_mask_img_shape"] = (1, 1)
-        new_conditioning.append([cond, new_cond_dict])
+        if "pooled_output" in new_cond_dict and new_cond_dict["pooled_output"] is not None:
+            new_cond_dict["pooled_output"] = new_cond_dict["pooled_output"].clone() * max_strength
+
+        new_conditioning.append([new_cond, new_cond_dict])
 
     return new_conditioning
 
-class AttentionBiasTextEncodeFlux2SystemPrompt(io.ComfyNode):
+class ScaledBiasTextEncodeFlux2SystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="AttentionBiasTextEncodeFlux2SystemPrompt",
+            node_id="ScaledBiasTextEncodeFlux2SystemPrompt",
             category="advanced/conditioning",
-            display_name="Text Encode with Flux2 dev System Prompt (Attention Bias)",
+            display_name="Text Encode with Flux2 dev System Prompt (Scaled Bias)",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -1964,20 +2010,20 @@ class AttentionBiasTextEncodeFlux2SystemPrompt(io.ComfyNode):
             template_prefix = r"[SYSTEM_PROMPT]"
             template_suffix = r"[/SYSTEM_PROMPT][INST]{}[/INST]"
             llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
-            conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+            conditioning = encode_embedding_scaled_bias(clip, prompt, llama_template=llama_template)
         else:
-            conditioning = encode_attention_bias(clip, prompt)
+            conditioning = encode_embedding_scaled_bias(clip, prompt)
 
         return io.NodeOutput(conditioning)
 
 
-class AttentionBiasTextEncodeKleinSystemPrompt(io.ComfyNode):
+class ScaledBiasTextEncodeKleinSystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="AttentionBiasTextEncodeKleinSystemPrompt",
+            node_id="ScaledBiasTextEncodeKleinSystemPrompt",
             category="advanced/conditioning",
-            display_name="Text Encode with Flux2 Klein System Prompt (Attention Bias)",
+            display_name="Text Encode with Flux2 Klein System Prompt (Scaled Bias)",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -2010,17 +2056,17 @@ class AttentionBiasTextEncodeKleinSystemPrompt(io.ComfyNode):
                 "<|im_start|>assistant\n<think>\n" + thinking_content + "\n</think>\n\n"
             )
 
-        conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+        conditioning = encode_embedding_scaled_bias(clip, prompt, llama_template=llama_template)
         return io.NodeOutput(conditioning)
 
 
-class AttentionBiasTextEncodeLtxv2SystemPrompt(io.ComfyNode):
+class ScaledBiasTextEncodeLtxv2SystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="AttentionBiasTextEncodeLtxv2SystemPrompt",
+            node_id="ScaledBiasTextEncodeLtxv2SystemPrompt",
             category="advanced/conditioning",
-            display_name="Text Encode with LTXV 2 System Prompt (Attention Bias)",
+            display_name="Text Encode with LTXV 2 System Prompt (Scaled Bias)",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -2050,17 +2096,17 @@ class AttentionBiasTextEncodeLtxv2SystemPrompt(io.ComfyNode):
                 "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
             )
 
-        conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template, image=image)
+        conditioning = encode_embedding_scaled_bias(clip, prompt, llama_template=llama_template, image=image)
         return io.NodeOutput(conditioning)
 
 
-class AttentionBiasTextEncodeZITSystemPrompt(io.ComfyNode):
+class ScaledBiasTextEncodeZITSystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="AttentionBiasTextEncodeZITSystemPrompt",
+            node_id="ScaledBiasTextEncodeZITSystemPrompt",
             category="advanced/conditioning",
-            display_name="Text Encode with Z-Image System Prompt (Attention Bias)",
+            display_name="Text Encode with Z-Image System Prompt (Scaled Bias)",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -2079,20 +2125,20 @@ class AttentionBiasTextEncodeZITSystemPrompt(io.ComfyNode):
                 "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
             )
             llama_template = f"{template_prefix}{system_prompt}{template_suffix}"
-            conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+            conditioning = encode_embedding_scaled_bias(clip, prompt, llama_template=llama_template)
         else:
-            conditioning = encode_attention_bias(clip, prompt)
+            conditioning = encode_embedding_scaled_bias(clip, prompt)
 
         return io.NodeOutput(conditioning)
 
 
-class AttentionBiasTextEncodeZImageThinkPrompt(io.ComfyNode):
+class ScaledBiasTextEncodeZImageThinkPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="AttentionBiasTextEncodeZImageThinkPrompt",
+            node_id="ScaledBiasTextEncodeZImageThinkPrompt",
             category="advanced/conditioning",
-            display_name="Text Encode with Z-Image Thinking Prompt (Attention Bias)",
+            display_name="Text Encode with Z-Image Thinking Prompt (Scaled Bias)",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
@@ -2109,20 +2155,20 @@ class AttentionBiasTextEncodeZImageThinkPrompt(io.ComfyNode):
             template_prefix = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n"
             template_suffix = "\n</think>\n\n"
             llama_template = f"{template_prefix}{thinking}{template_suffix}"
-            conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+            conditioning = encode_embedding_scaled_bias(clip, prompt, llama_template=llama_template)
         else:
-            conditioning = encode_attention_bias(clip, prompt)
+            conditioning = encode_embedding_scaled_bias(clip, prompt)
 
         return io.NodeOutput(conditioning)
 
 
-class AttentionBiasTextEncodeSystemPrompt(io.ComfyNode):
+class ScaledBiasTextEncodeSystemPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="AttentionBiasTextEncodeSystemPrompt",
+            node_id="ScaledBiasTextEncodeSystemPrompt",
             category="advanced/conditioning",
-            display_name="Text Encode System Prompt (Attention Bias)",
+            display_name="Text Encode System Prompt (Scaled Bias)",
             inputs=[
                 io.Clip.Input("clip"),
                 io.Combo.Input(
@@ -2167,7 +2213,7 @@ class AttentionBiasTextEncodeSystemPrompt(io.ComfyNode):
         else:
             llama_template = None
 
-        conditioning = encode_attention_bias(clip, prompt, llama_template=llama_template)
+        conditioning = encode_embedding_scaled_bias(clip, prompt, llama_template=llama_template)
         return io.NodeOutput(conditioning)
 
 
@@ -4256,12 +4302,12 @@ class SamplingUtils(ComfyExtension):
             TextEncodeZITSystemPrompt,
             TextEncodeZImageThinkPrompt,
             TextEncodeSystemPrompt,
-            AttentionBiasTextEncodeFlux2SystemPrompt,
-            AttentionBiasTextEncodeKleinSystemPrompt,
-            AttentionBiasTextEncodeLtxv2SystemPrompt,
-            AttentionBiasTextEncodeZITSystemPrompt,
-            AttentionBiasTextEncodeZImageThinkPrompt,
-            AttentionBiasTextEncodeSystemPrompt,
+            ScaledBiasTextEncodeFlux2SystemPrompt,
+            ScaledBiasTextEncodeKleinSystemPrompt,
+            ScaledBiasTextEncodeLtxv2SystemPrompt,
+            ScaledBiasTextEncodeZITSystemPrompt,
+            ScaledBiasTextEncodeZImageThinkPrompt,
+            ScaledBiasTextEncodeSystemPrompt,
             ModifyMask,
             ImageBlendByMask,
             SU_InjectNoiseToLatent,
