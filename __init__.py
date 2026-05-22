@@ -677,6 +677,221 @@ def _composite(original_np: np.ndarray,
     return result, composite_mask, stats
 
 
+def _fill_mask_from_edges(
+    image_tensor: torch.Tensor,
+    mask_tensor: torch.Tensor,
+    inpaint_radius: int,
+    edge_blend_blur: int,
+) -> torch.Tensor:
+
+    batch_size = image_tensor.size(0)
+    out_tensors = []
+    mask_batch = mask_tensor.size(0)
+
+    for i in range(batch_size):
+        # ComfyUI images are typically [B, H, W, C], float32, 0.0-1.0
+        # Convert to numpy uint8 for OpenCV
+        img_np = np.clip(255.0 * image_tensor[i].cpu().numpy(), 0, 255).astype(np.uint8)
+
+        # If the image has an alpha channel, we only inpaint the RGB channels
+        has_alpha = img_np.shape[-1] == 4
+        if has_alpha:
+            alpha_channel = img_np[:, :, 3]
+            img_np = img_np[:, :, :3]
+
+        # Extract and format the mask
+        mask_i = i if i < mask_batch else 0
+        m_t = mask_tensor[mask_i].cpu().numpy()
+
+        if m_t.ndim > 2:
+            m_t = m_t.squeeze()
+        if m_t.shape[:2] != img_np.shape[:2]:
+            m_t = cv2.resize(m_t, (img_np.shape[1], img_np.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+        # OpenCV inpaint requires a strictly binary 8-bit mask
+        mask_np = np.clip(255.0 * m_t, 0, 255).astype(np.uint8)
+        _, mask_binary = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+
+        # Apply Navier-Stokes Inpainting (pulls edge pixels inward)
+        inpainted = cv2.inpaint(img_np, mask_binary, inpaintRadius=inpaint_radius, flags=cv2.INPAINT_NS)
+
+        # Smooth boundary blending
+        if edge_blend_blur > 0:
+            # Ensure blur kernel size is odd
+            blur_size = edge_blend_blur if edge_blend_blur % 2 == 1 else edge_blend_blur + 1
+
+            # Create a soft mask for alpha blending the inpainted result back onto the original
+            soft_mask = cv2.GaussianBlur(mask_np.astype(np.float32) / 255.0, (blur_size, blur_size), 0)
+            soft_mask = soft_mask[:, :, np.newaxis]  # Reshape to [H, W, 1] for broadcasting
+
+            img_f = img_np.astype(np.float32)
+            inpainted_f = inpainted.astype(np.float32)
+
+            # Composite: Original image where mask is 0, Inpainted image where mask is 1
+            final_np = img_f * (1.0 - soft_mask) + inpainted_f * soft_mask
+            final_np = np.clip(final_np, 0, 255).astype(np.uint8)
+        else:
+            final_np = inpainted
+
+        # Restore alpha channel if it existed
+        if has_alpha:
+            final_np = np.dstack((final_np, alpha_channel))
+
+        # Convert back to ComfyUI tensor [1, H, W, C]
+        out_tensor = torch.from_numpy(final_np.astype(np.float32) / 255.0).unsqueeze(0)
+        out_tensors.append(out_tensor)
+
+    return torch.cat(out_tensors, dim=0)
+
+
+def _create_stretched_patch(img: np.ndarray, x: int, y: int, w: int, h: int, sample_thickness: int, axis: str) -> np.ndarray:
+    """Extracts, flips, stretches, and cross-fades patches from outside the bounding box."""
+    H, W_img, C = img.shape
+
+    if axis == 'horizontal':
+        L_start = max(0, x - sample_thickness)
+        L_width = x - L_start
+        R_end = min(W_img, x + w + sample_thickness)
+        R_width = R_end - (x + w)
+
+        L_stretch, R_stretch = None, None
+
+        if L_width > 0:
+            L_patch = img[y:y+h, L_start:x]
+            L_patch = L_patch[:, ::-1, :]
+            L_stretch = cv2.resize(L_patch, (w, h)).astype(np.float32)
+
+        if R_width > 0:
+            R_patch = img[y:y+h, x+w:R_end]
+            R_patch = R_patch[:, ::-1, :]
+            R_stretch = cv2.resize(R_patch, (w, h)).astype(np.float32)
+
+        weights = np.linspace(1.0, 0.0, w).reshape(1, w, 1)
+
+        if L_stretch is not None and R_stretch is not None:
+            return L_stretch * weights + R_stretch * (1.0 - weights)
+        elif L_stretch is not None:
+            return L_stretch
+        elif R_stretch is not None:
+            return R_stretch
+        else:
+            return np.zeros((h, w, C), dtype=np.float32)
+
+    elif axis == 'vertical':
+        T_start = max(0, y - sample_thickness)
+        T_height = y - T_start
+        B_end = min(H, y + h + sample_thickness)
+        B_height = B_end - (y + h)
+
+        T_stretch, B_stretch = None, None
+
+        if T_height > 0:
+            T_patch = img[T_start:y, x:x+w]
+            T_patch = T_patch[::-1, :, :]
+            T_stretch = cv2.resize(T_patch, (w, h)).astype(np.float32)
+
+        if B_height > 0:
+            B_patch = img[y+h:B_end, x:x+w]
+            B_patch = B_patch[::-1, :, :]
+            B_stretch = cv2.resize(B_patch, (w, h)).astype(np.float32)
+
+        weights = np.linspace(1.0, 0.0, h).reshape(h, 1, 1)
+
+        if T_stretch is not None and B_stretch is not None:
+            return T_stretch * weights + B_stretch * (1.0 - weights)
+        elif T_stretch is not None:
+            return T_stretch
+        elif B_stretch is not None:
+            return B_stretch
+        else:
+            return np.zeros((h, w, C), dtype=np.float32)
+
+
+def _iterative_directional_stretch_fill(
+    image_tensor: torch.Tensor,
+    mask_tensor: torch.Tensor,
+    stretch_axis: str,
+    sample_thickness: int,
+    edge_blend_blur: int,
+    iterations: int,
+    mask_decay_pixels: int,
+) -> torch.Tensor:
+
+    batch_size = image_tensor.size(0)
+    out_tensors = []
+    mask_batch = mask_tensor.size(0)
+
+    # Use a circular kernel for smoother, more natural mask erosion
+    erosion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+
+    for i in range(batch_size):
+        img_np = np.clip(255.0 * image_tensor[i].cpu().numpy(), 0, 255).astype(np.uint8)
+
+        has_alpha = img_np.shape[-1] == 4
+        if has_alpha:
+            alpha_channel = img_np[:, :, 3]
+            img_np = img_np[:, :, :3]
+
+        mask_i = i if i < mask_batch else 0
+        m_t = mask_tensor[mask_i].cpu().numpy()
+
+        if m_t.ndim > 2:
+            m_t = m_t.squeeze()
+        if m_t.shape[:2] != img_np.shape[:2]:
+            m_t = cv2.resize(m_t, (img_np.shape[1], img_np.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+        mask_np = np.clip(255.0 * m_t, 0, 255).astype(np.uint8)
+        _, mask_binary = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
+
+        working_img = np.copy(img_np)
+        working_mask = np.copy(mask_binary)
+
+        for step in range(iterations):
+            # Early stop if the mask has been completely eroded away
+            if cv2.countNonZero(working_mask) == 0:
+                break
+
+            # Create a canvas to hold our stretched fills
+            canvas = np.copy(working_img).astype(np.float32)
+            contours, _ = cv2.findContours(working_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for c in contours:
+                x, y, w, h = cv2.boundingRect(c)
+                if w < 2 or h < 2:
+                    continue
+
+                current_axis = stretch_axis
+                if current_axis == 'auto':
+                    current_axis = 'horizontal' if w < h else 'vertical'
+
+                patch = _create_stretched_patch(working_img, x, y, w, h, sample_thickness, current_axis)
+                canvas[y:y+h, x:x+w] = patch
+
+            # Composite the current step
+            if edge_blend_blur > 0:
+                blur_size = edge_blend_blur if edge_blend_blur % 2 == 1 else edge_blend_blur + 1
+                soft_mask = cv2.GaussianBlur(working_mask.astype(np.float32) / 255.0, (blur_size, blur_size), 0)
+                soft_mask = soft_mask[:, :, np.newaxis]
+            else:
+                soft_mask = (working_mask.astype(np.float32) / 255.0)[:, :, np.newaxis]
+
+            working_f = working_img.astype(np.float32)
+            merged = working_f * (1.0 - soft_mask) + canvas * soft_mask
+            working_img = np.clip(merged, 0, 255).astype(np.uint8)
+
+            # Erode the mask for the next iteration (unless it's the final step)
+            if step < iterations - 1 and mask_decay_pixels > 0:
+                working_mask = cv2.erode(working_mask, erosion_kernel, iterations=mask_decay_pixels)
+
+        if has_alpha:
+            working_img = np.dstack((working_img, alpha_channel))
+
+        out_tensor = torch.from_numpy(working_img.astype(np.float32) / 255.0).unsqueeze(0)
+        out_tensors.append(out_tensor)
+
+    return torch.cat(out_tensors, dim=0)
+
+
 def get_token_count(clip, text, **kwargs):
     """
     Robustly tokenizes a text segment and returns the number of its content tokens.
@@ -3613,6 +3828,132 @@ class OpticalFlowComposite(io.ComfyNode):
                 "\n".join(report_lines))
 
 
+class ImageInwardEdgeFill(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="ImageInwardEdgeFill",
+            display_name="Image Inward Edge Fill",
+            category="advanced/image",
+            inputs=[
+                io.Image.Input("image"),
+                io.Mask.Input("mask"),
+                io.Int.Input(
+                    "inpaint_radius",
+                    default=3,
+                    min=1,
+                    max=100,
+                    step=1,
+                    tooltip="How far the algorithm looks for edge pixels. Higher values are slower but better for large holes."
+                ),
+                io.Int.Input(
+                    "edge_blend_blur",
+                    default=9,
+                    min=0,
+                    max=101,
+                    step=2,
+                    tooltip="Applies a Gaussian blur to the mask to smoothly blend the filled area with the original edges. 0 disables it."
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        image: torch.Tensor,
+        mask: torch.Tensor,
+        inpaint_radius: int,
+        edge_blend_blur: int,
+    ) -> io.NodeOutput:
+        result = _fill_mask_from_edges(
+            image,
+            mask,
+            inpaint_radius,
+            edge_blend_blur,
+        )
+        return io.NodeOutput(result)
+
+
+class ImageIterativeStretchFill(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="ImageIterativeStretchFill",
+            display_name="Image Iterative Stretch Fill",
+            category="advanced/image",
+            inputs=[
+                io.Image.Input("image"),
+                io.Mask.Input("mask"),
+                io.Combo.Input(
+                    "stretch_axis",
+                    default="auto",
+                    options=["auto", "horizontal", "vertical"],
+                    tooltip="'Auto' stretches across the narrowest dimension of the current mask."
+                ),
+                io.Int.Input(
+                    "sample_thickness",
+                    default=32,
+                    min=1,
+                    max=512,
+                    step=1,
+                    tooltip="How many pixels of unmasked image to grab from the edges to stretch inwards."
+                ),
+                io.Int.Input(
+                    "edge_blend_blur",
+                    default=9,
+                    min=0,
+                    max=101,
+                    step=2,
+                    tooltip="Softens the mask boundary to seamlessly blend the stretched fill."
+                ),
+                io.Int.Input(
+                    "iterations",
+                    default=5,
+                    min=1,
+                    max=50,
+                    step=1,
+                    tooltip="Number of times to repeat the stretch and fill process."
+                ),
+                io.Int.Input(
+                    "mask_decay_pixels",
+                    default=4,
+                    min=0,
+                    max=64,
+                    step=1,
+                    tooltip="Shrinks the mask by this many pixels each iteration, creating a telescoping fill effect."
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="image"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        image: torch.Tensor,
+        mask: torch.Tensor,
+        stretch_axis: str,
+        sample_thickness: int,
+        edge_blend_blur: int,
+        iterations: int,
+        mask_decay_pixels: int,
+    ) -> io.NodeOutput:
+        result = _iterative_directional_stretch_fill(
+            image,
+            mask,
+            stretch_axis,
+            sample_thickness,
+            edge_blend_blur,
+            iterations,
+            mask_decay_pixels,
+        )
+        return io.NodeOutput(result)
+
+
 class TextOverlayNode(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -4341,6 +4682,8 @@ class SamplingUtils(ComfyExtension):
             IntegerRangeRandom,
             ImageMatchPropertiesNode,
             OpticalFlowComposite,
+            ImageInwardEdgeFill,
+            ImageIterativeStretchFill,
             TextOverlayNode,
             RandInt,
             StaticInt,
