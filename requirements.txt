@@ -2,4 +2,4 @@ kornia
 scipy
 pilgram
 opencv-python
-unifiedefficientloader==0.2.3
+unifiedefficientloader==0.5.0
