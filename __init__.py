@@ -744,67 +744,94 @@ def _fill_mask_from_edges(
     return torch.cat(out_tensors, dim=0)
 
 
-def _create_stretched_patch(img: np.ndarray, x: int, y: int, w: int, h: int, sample_thickness: int, axis: str) -> np.ndarray:
-    """Extracts, flips, stretches, and cross-fades patches from outside the bounding box."""
+def _create_stretched_patch(img: np.ndarray, mask_binary: np.ndarray, axis: str, sample_thickness: int) -> np.ndarray:
+    """
+    Scans rows/cols to find the exact organic mask edges, samples a patch of 'sample_thickness',
+    mirrors it, stretches it across the gap, and cross-fades.
+    """
     H, W_img, C = img.shape
+    out = np.copy(img).astype(np.float32)
+    m_bool = (mask_binary > 127).astype(np.int8)
 
     if axis == 'horizontal':
-        L_start = max(0, x - sample_thickness)
-        L_width = x - L_start
-        R_end = min(W_img, x + w + sample_thickness)
-        R_width = R_end - (x + w)
+        for y in range(H):
+            row_mask = m_bool[y]
+            if not np.any(row_mask): continue
 
-        L_stretch, R_stretch = None, None
+            padded = np.pad(row_mask, (1, 1), mode='constant', constant_values=0)
+            diff = np.diff(padded)
+            starts = np.where(diff == 1)[0]
+            ends = np.where(diff == -1)[0] - 1
 
-        if L_width > 0:
-            L_patch = img[y:y+h, L_start:x]
-            L_patch = L_patch[:, ::-1, :]
-            L_stretch = cv2.resize(L_patch, (w, h)).astype(np.float32)
+            for start, end in zip(starts, ends):
+                w = end - start + 1
 
-        if R_width > 0:
-            R_patch = img[y:y+h, x+w:R_end]
-            R_patch = R_patch[:, ::-1, :]
-            R_stretch = cv2.resize(R_patch, (w, h)).astype(np.float32)
+                L_start = max(0, start - sample_thickness)
+                L_width = start - L_start
+                R_end = min(W_img, end + 1 + sample_thickness)
+                R_width = R_end - (end + 1)
 
-        weights = np.linspace(1.0, 0.0, w).reshape(1, w, 1)
+                L_stretch, R_stretch = None, None
 
-        if L_stretch is not None and R_stretch is not None:
-            return L_stretch * weights + R_stretch * (1.0 - weights)
-        elif L_stretch is not None:
-            return L_stretch
-        elif R_stretch is not None:
-            return R_stretch
-        else:
-            return np.zeros((h, w, C), dtype=np.float32)
+                if L_width > 0:
+                    L_strip = img[y, L_start:start].reshape(1, L_width, C)
+                    L_strip = L_strip[:, ::-1, :] # Mirror horizontally
+                    L_stretch = cv2.resize(L_strip, (w, 1)).reshape(w, C).astype(np.float32)
+
+                if R_width > 0:
+                    R_strip = img[y, end+1:R_end].reshape(1, R_width, C)
+                    R_strip = R_strip[:, ::-1, :] # Mirror horizontally
+                    R_stretch = cv2.resize(R_strip, (w, 1)).reshape(w, C).astype(np.float32)
+
+                weights = np.linspace(1.0, 0.0, w).reshape(w, 1)
+
+                if L_stretch is not None and R_stretch is not None:
+                    out[y, start:end+1] = L_stretch * weights + R_stretch * (1.0 - weights)
+                elif L_stretch is not None:
+                    out[y, start:end+1] = L_stretch
+                elif R_stretch is not None:
+                    out[y, start:end+1] = R_stretch
 
     elif axis == 'vertical':
-        T_start = max(0, y - sample_thickness)
-        T_height = y - T_start
-        B_end = min(H, y + h + sample_thickness)
-        B_height = B_end - (y + h)
+        for x in range(W_img):
+            col_mask = m_bool[:, x]
+            if not np.any(col_mask): continue
 
-        T_stretch, B_stretch = None, None
+            padded = np.pad(col_mask, (1, 1), mode='constant', constant_values=0)
+            diff = np.diff(padded)
+            starts = np.where(diff == 1)[0]
+            ends = np.where(diff == -1)[0] - 1
 
-        if T_height > 0:
-            T_patch = img[T_start:y, x:x+w]
-            T_patch = T_patch[::-1, :, :]
-            T_stretch = cv2.resize(T_patch, (w, h)).astype(np.float32)
+            for start, end in zip(starts, ends):
+                h_seg = end - start + 1
 
-        if B_height > 0:
-            B_patch = img[y+h:B_end, x:x+w]
-            B_patch = B_patch[::-1, :, :]
-            B_stretch = cv2.resize(B_patch, (w, h)).astype(np.float32)
+                T_start = max(0, start - sample_thickness)
+                T_height = start - T_start
+                B_end = min(H, end + 1 + sample_thickness)
+                B_height = B_end - (end + 1)
 
-        weights = np.linspace(1.0, 0.0, h).reshape(h, 1, 1)
+                T_stretch, B_stretch = None, None
 
-        if T_stretch is not None and B_stretch is not None:
-            return T_stretch * weights + B_stretch * (1.0 - weights)
-        elif T_stretch is not None:
-            return T_stretch
-        elif B_stretch is not None:
-            return B_stretch
-        else:
-            return np.zeros((h, w, C), dtype=np.float32)
+                if T_height > 0:
+                    T_strip = img[T_start:start, x].reshape(T_height, 1, C)
+                    T_strip = T_strip[::-1, :, :] # Mirror vertically
+                    T_stretch = cv2.resize(T_strip, (1, h_seg)).reshape(h_seg, C).astype(np.float32)
+
+                if B_height > 0:
+                    B_strip = img[end+1:B_end, x].reshape(B_height, 1, C)
+                    B_strip = B_strip[::-1, :, :] # Mirror vertically
+                    B_stretch = cv2.resize(B_strip, (1, h_seg)).reshape(h_seg, C).astype(np.float32)
+
+                weights = np.linspace(1.0, 0.0, h_seg).reshape(h_seg, 1)
+
+                if T_stretch is not None and B_stretch is not None:
+                    out[start:end+1, x] = T_stretch * weights + B_stretch * (1.0 - weights)
+                elif T_stretch is not None:
+                    out[start:end+1, x] = T_stretch
+                elif B_stretch is not None:
+                    out[start:end+1, x] = B_stretch
+
+    return out
 
 
 def _iterative_directional_stretch_fill(
@@ -821,7 +848,6 @@ def _iterative_directional_stretch_fill(
     out_tensors = []
     mask_batch = mask_tensor.size(0)
 
-    # Use a circular kernel for smoother, more natural mask erosion
     erosion_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
     for i in range(batch_size):
@@ -847,27 +873,17 @@ def _iterative_directional_stretch_fill(
         working_mask = np.copy(mask_binary)
 
         for step in range(iterations):
-            # Early stop if the mask has been completely eroded away
             if cv2.countNonZero(working_mask) == 0:
                 break
 
-            # Create a canvas to hold our stretched fills
-            canvas = np.copy(working_img).astype(np.float32)
-            contours, _ = cv2.findContours(working_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            current_axis = stretch_axis
+            if current_axis == 'auto':
+                x, y, w, h = cv2.boundingRect(working_mask)
+                current_axis = 'horizontal' if w < h else 'vertical'
 
-            for c in contours:
-                x, y, w, h = cv2.boundingRect(c)
-                if w < 2 or h < 2:
-                    continue
+            # Pass the full image and mask into our stretch function
+            canvas = _create_stretched_patch(working_img, working_mask, current_axis, sample_thickness)
 
-                current_axis = stretch_axis
-                if current_axis == 'auto':
-                    current_axis = 'horizontal' if w < h else 'vertical'
-
-                patch = _create_stretched_patch(working_img, x, y, w, h, sample_thickness, current_axis)
-                canvas[y:y+h, x:x+w] = patch
-
-            # Composite the current step
             if edge_blend_blur > 0:
                 blur_size = edge_blend_blur if edge_blend_blur % 2 == 1 else edge_blend_blur + 1
                 soft_mask = cv2.GaussianBlur(working_mask.astype(np.float32) / 255.0, (blur_size, blur_size), 0)
@@ -879,7 +895,6 @@ def _iterative_directional_stretch_fill(
             merged = working_f * (1.0 - soft_mask) + canvas * soft_mask
             working_img = np.clip(merged, 0, 255).astype(np.uint8)
 
-            # Erode the mask for the next iteration (unless it's the final step)
             if step < iterations - 1 and mask_decay_pixels > 0:
                 working_mask = cv2.erode(working_mask, erosion_kernel, iterations=mask_decay_pixels)
 
