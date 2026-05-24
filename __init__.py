@@ -3,6 +3,7 @@ import os
 import json
 import re
 import random
+from enum import Enum
 from PIL import Image, ImageOps, ImageDraw, ImageFilter, ImageFont, ImageSequence
 from typing import Union, List, Tuple
 import torch
@@ -963,6 +964,29 @@ def get_token_count(clip, text, **kwargs):
     return max(0, max_content_len)
 
 
+class AspectRatio(str, Enum):
+    SQUARE = "1:1 (Square)"
+    PHOTO_H = "3:2 (Photo)"
+    STANDARD_H = "4:3 (Standard)"
+    WIDESCREEN_H = "16:9 (Widescreen)"
+    ULTRAWIDE_H = "21:9 (Ultrawide)"
+    PHOTO_V = "2:3 (Portrait Photo)"
+    STANDARD_V = "3:4 (Portrait Standard)"
+    WIDESCREEN_V = "9:16 (Portrait Widescreen)"
+
+
+ASPECT_RATIOS: dict[AspectRatio, tuple[int, int]] = {
+    AspectRatio.SQUARE: (1, 1),
+    AspectRatio.PHOTO_H: (3, 2),
+    AspectRatio.STANDARD_H: (4, 3),
+    AspectRatio.WIDESCREEN_H: (16, 9),
+    AspectRatio.ULTRAWIDE_H: (21, 9),
+    AspectRatio.PHOTO_V: (2, 3),
+    AspectRatio.STANDARD_V: (3, 4),
+    AspectRatio.WIDESCREEN_V: (9, 16),
+}
+
+
 class LlamaTokenizerOptions(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -1140,6 +1164,7 @@ class AdjustedResolutionParameters(io.ComfyNode):
                 io.Int.Output(display_name="adjusted_height"),
                 io.Int.Output(display_name="upscaled_width"),
                 io.Int.Output(display_name="upscaled_height"),
+                io.Int.Output(display_name="batch_size"),
             ],
         )
 
@@ -1150,6 +1175,103 @@ class AdjustedResolutionParameters(io.ComfyNode):
         upscaled_width = round_to_nearest(width * scale_by, multiple)
         upscaled_height = round_to_nearest(height * scale_by, multiple)
         return io.NodeOutput(
+            adjusted_width,
+            adjusted_height,
+            upscaled_width,
+            upscaled_height,
+            batch_size,
+        )
+
+class ImageScaleAndResolutionPicker(io.ComfyNode):
+    upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
+    crop_methods = ["disabled", "center"]
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="ImageScaleAndResolutionPicker",
+            category="utils",
+            inputs=[
+                io.Image.Input("image", optional=True),
+                io.Combo.Input("upscale_method", options=cls.upscale_methods),
+                io.Combo.Input("crop_method", options=cls.crop_methods, tooltip="If cropping is enabled, the image will be cropped to the target aspect ratio before resizing. Center cropping is used, so the center of the image will be preserved and equal amounts will be cropped from either side."),
+                io.Combo.Input(
+                    "aspect_ratio",
+                    options=AspectRatio,
+                    default=AspectRatio.SQUARE,
+                    tooltip="The aspect ratio for the output dimensions and cropping.",
+                ),
+                io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.01),
+                io.Int.Input("resolution_steps", default=1, min=1, max=256, advanced=True),
+                io.Float.Input(
+                    id="scale_by",
+                    default=1.0,
+                    min=0.0,
+                    max=10.0,
+                    step=0.01,
+                    tooltip="How much to upscale initial resolution by for the upscaled one.",
+                ),
+                io.Int.Input(
+                    id="multiple",
+                    default=16,
+                    min=4,
+                    max=128,
+                    step=4,
+                    tooltip="Nearest multiple of the result to set the upscaled resolution to.",
+                ),
+            ],
+            outputs=[
+                io.Image.Output("image", tooltip="The adjusted/cropped base image"),
+                io.Image.Output("upscaled_image", tooltip="The image after applying the upscale_by factor"),
+                io.Int.Output(display_name="adjusted_width"),
+                io.Int.Output(display_name="adjusted_height"),
+                io.Int.Output(display_name="upscaled_width"),
+                io.Int.Output(display_name="upscaled_height"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, image, upscale_method: str, crop_method: str, aspect_ratio: AspectRatio, megapixels: float, resolution_steps: int, scale_by: float, multiple: int) -> io.NodeOutput:
+        total = megapixels * 1024 * 1024
+
+        if image is not None:
+            # B, H, W, C
+            samples = image.movedim(-1, 1) # B, C, H, W
+            img_h, img_w = samples.shape[2], samples.shape[3]
+
+            if crop_method == "center":
+                target_ratio_w, target_ratio_h = ASPECT_RATIOS[aspect_ratio]
+                base_scale = math.sqrt(total / (target_ratio_w * target_ratio_h))
+                width = round((target_ratio_w * base_scale) / resolution_steps) * resolution_steps
+                height = round((target_ratio_h * base_scale) / resolution_steps) * resolution_steps
+            else:
+                scale_by = math.sqrt(total / (img_w * img_h))
+                width = round(img_w * scale_by / resolution_steps) * resolution_steps
+                height = round(img_h * scale_by / resolution_steps) * resolution_steps
+        else:
+            target_ratio_w, target_ratio_h = ASPECT_RATIOS[aspect_ratio]
+            base_scale = math.sqrt(total / (target_ratio_w * target_ratio_h))
+            width = round((target_ratio_w * base_scale) / resolution_steps) * resolution_steps
+            height = round((target_ratio_h * base_scale) / resolution_steps) * resolution_steps
+
+            device = comfy.model_management.intermediate_device()
+            dtype = comfy.model_management.intermediate_dtype()
+            samples = torch.zeros([1, 3, height, width], dtype=dtype, device=device) # B, C, H, W
+
+        adjusted_width = round_to_nearest(width, multiple)
+        adjusted_height = round_to_nearest(height, multiple)
+        upscaled_width = round_to_nearest(width * scale_by, multiple)
+        upscaled_height = round_to_nearest(height * scale_by, multiple)
+
+        adjusted_samples = comfy.utils.common_upscale(samples, int(adjusted_width), int(adjusted_height), upscale_method, crop_method)
+        upscaled_samples = comfy.utils.common_upscale(adjusted_samples, int(upscaled_width), int(upscaled_height), upscale_method, "disabled")
+
+        adjusted_image_out = adjusted_samples.movedim(1, -1)
+        upscaled_image_out = upscaled_samples.movedim(1, -1)
+
+        return io.NodeOutput(
+            adjusted_image_out,
+            upscaled_image_out,
             adjusted_width,
             adjusted_height,
             upscaled_width,
@@ -4650,6 +4772,7 @@ class SamplingUtils(ComfyExtension):
             LlamaTokenizerOptions,
             SamplingParameters,
             AdjustedResolutionParameters,
+            ImageScaleAndResolutionPicker,
             GetJsonKeyValue,
             Image_Color_Noise,
             TextEncodeFlux2SystemPrompt,
