@@ -908,60 +908,24 @@ def _iterative_directional_stretch_fill(
     return torch.cat(out_tensors, dim=0)
 
 
-def get_token_count(clip, text, **kwargs):
-    """
-    Robustly tokenizes a text segment and returns the number of its content tokens.
-    Calculates true length by ignoring padding tokens added by fixed-length tokenizers (like Qwen3).
-    """
-    # Only return 0 if no text AND no llama_template (which adds tokens)
-    if not text and not kwargs.get("llama_template"):
-        return 0
+def get_token_count(clip, text):
+        """
+        Robustly tokenizes a text segment and returns the number of its content tokens.
+        """
+        if not text:
+            return 0
 
-    tokens = clip.tokenize(text, **kwargs)
+        tokens = clip.tokenize(text)
 
-    max_content_len = 0
-    for key in tokens:
-        if len(tokens[key]) > 0 and len(tokens[key][0]) > 0:
-            token_list = tokens[key][0]
+        max_content_len = 0
+        for key in tokens:
+            if len(tokens[key]) > 0 and len(tokens[key][0]) > 0:
 
-            # Count tokens that aren't padding.
-            # In ComfyUI, padding tokens are usually 0 or the end-of-text token repeated.
-            # We find the first occurrence of the end-of-text token or look for the padding.
+                content_len = len(tokens[key][0]) - 2
+                if content_len > max_content_len:
+                    max_content_len = content_len
 
-            # For robust counting across models:
-            # 1. Start with the full length
-            # 2. Subtract 2 (for start and end tokens)
-            # 3. If the length is still suspiciously large (like 510 or 254),
-            #    it's likely a padded tokenizer. We try to find the actual content.
-
-            raw_len = len(token_list)
-            content_len = raw_len - 2
-
-            # If it looks like a fixed-length padded result (common for T5/Qwen in ComfyUI)
-            if raw_len >= 77:
-                # Find the actual used length.
-                # Most tokenizers pad with 0 or the last token (EOS).
-                if isinstance(token_list, torch.Tensor):
-                    ids = token_list.tolist()
-                else:
-                    ids = token_list
-
-                # Qwen/Llama usually have a start token at 0.
-                # Let's count how many IDs are actually distinct from the last token in the list
-                # (which is usually the padding token)
-                pad_id = ids[-1]
-                actual_count = 0
-                for i in range(1, len(ids) - 1): # Skip start token at 0 and end token
-                    if ids[i] != pad_id:
-                        actual_count += 1
-                    else:
-                        break # Hit padding
-                content_len = actual_count
-
-            if content_len > max_content_len:
-                max_content_len = content_len
-
-    return max(0, max_content_len)
+        return max(0, max_content_len)
 
 
 class AspectRatio(str, Enum):
@@ -2169,7 +2133,7 @@ class AttentionBiasTextEncode(io.ComfyNode):
         if clip is None:
             raise RuntimeError("ERROR: clip input is invalid: None\n\nIf the clip is from a checkpoint loader node your checkpoint does not contain a valid clip or text encoder model.")
 
-        if "<" not in text and ">" not in text and "=" not in text:
+        if '<' not in text and '>' not in text and '=' not in text:
             tokens = clip.tokenize(text)
             cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
             return ([[cond, {"pooled_output": pooled}]], )
@@ -2192,7 +2156,7 @@ class AttentionBiasTextEncode(io.ComfyNode):
                 bias_text, strength_str = match.groups()
                 strength = float(strength_str)
                 clean_text += bias_text
-                num_tokens = get_token_count(clip, bias_text, llama_template="{}")
+                num_tokens = get_token_count(clip, bias_text)
 
                 if num_tokens > 0:
                     start_index = current_token_index
@@ -2202,60 +2166,44 @@ class AttentionBiasTextEncode(io.ComfyNode):
                 current_token_index += num_tokens
             else:
                 clean_text += segment
-                num_tokens = get_token_count(clip, segment, llama_template="{}")
+                num_tokens = get_token_count(clip, segment)
                 current_token_index += num_tokens
 
         tokens = clip.tokenize(clean_text)
-        conditioning = clip.encode_from_tokens_scheduled(tokens)
+        cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
 
         if not biases_to_apply:
-            return io.NodeOutput(conditioning)
+            return ([[cond, {"pooled_output": pooled}]], )
 
-        new_conditioning = []
-        for i in range(len(conditioning)):
-            cond, cond_dict = conditioning[i]
-            n_text_tokens = cond.shape[1]
-            device = cond.device
-            dtype = torch.float16
+        cond_dict = {"pooled_output": pooled}
+        n_text_tokens = cond.shape[1]
+        device = cond.device
+        dtype = torch.float16
 
-            final_seq_len = n_text_tokens + 1
-            attn_mask = torch.zeros((1, final_seq_len, final_seq_len), dtype=dtype, device=device)
 
-            pooled_offset = 1
+        final_seq_len = n_text_tokens + 1
+        attn_mask = torch.zeros((1, final_seq_len, final_seq_len), dtype=dtype, device=device)
 
-            for bias in biases_to_apply:
-                strength = bias["strength"]
-                s_val = max(1e-6, strength)
-                attn_bias_value = torch.log(torch.tensor(s_val, dtype=dtype, device=device))
+        pooled_offset = 1
 
-                start = min(bias["start"] + pooled_offset, final_seq_len)
-                end = min(bias["end"] + pooled_offset, final_seq_len)
+        for bias in biases_to_apply:
+            strength = bias["strength"]
+            attn_bias_value = torch.log(torch.tensor(strength, dtype=dtype, device=device))
 
-                if start >= end:
-                    continue
+            start = min(bias["start"] + pooled_offset, final_seq_len)
+            end = min(bias["end"] + pooled_offset, final_seq_len)
 
-                attn_mask[:, :, start:end] += attn_bias_value
-                attn_mask[:, start:end, :] += attn_bias_value
+            if start >= end:
+                continue
 
-            new_cond_dict = cond_dict.copy()
+            attn_mask[:, :, start:end] += attn_bias_value
+            attn_mask[:, start:end, :] += attn_bias_value
 
-            if "attention_mask" in cond_dict and cond_dict["attention_mask"] is not None:
-                base_mask = cond_dict["attention_mask"]
-                base_mask_float = torch.zeros_like(base_mask, dtype=dtype)
-                base_mask_float = base_mask_float.masked_fill(base_mask == 0, -10000.0)
+        cond_dict["attention_mask"] = attn_mask
+        cond_dict["attention_mask_img_shape"] = (1, 1)
 
-                expanded_base_mask = base_mask_float.unsqueeze(1) + base_mask_float.unsqueeze(2)
 
-                if expanded_base_mask.shape[-1] < final_seq_len:
-                    diff = final_seq_len - expanded_base_mask.shape[-1]
-                    expanded_base_mask = torch.nn.functional.pad(expanded_base_mask, (0, diff, 0, diff), value=0.0)
-
-                new_cond_dict["attention_mask"] = expanded_base_mask + attn_mask
-            else:
-                new_cond_dict["attention_mask"] = attn_mask
-
-            new_cond_dict["attention_mask_img_shape"] = (1, 1)
-            new_conditioning.append([cond, new_cond_dict])
+        new_conditioning = ([[cond, cond_dict]])
 
         return io.NodeOutput(new_conditioning)
 
