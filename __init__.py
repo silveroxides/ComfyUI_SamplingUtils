@@ -928,6 +928,62 @@ def get_token_count(clip, text):
         return max(0, max_content_len)
 
 
+def get_token_count_scaled(clip, text, **kwargs):
+    """
+    Robustly tokenizes a text segment and returns the number of its content tokens.
+    Calculates true length by ignoring padding tokens added by fixed-length tokenizers (like Qwen3).
+    """
+    # Only return 0 if no text AND no llama_template (which adds tokens)
+    if not text and not kwargs.get("llama_template"):
+        return 0
+
+    tokens = clip.tokenize(text, **kwargs)
+
+    max_content_len = 0
+    for key in tokens:
+        if len(tokens[key]) > 0 and len(tokens[key][0]) > 0:
+            token_list = tokens[key][0]
+
+            # Count tokens that aren't padding.
+            # In ComfyUI, padding tokens are usually 0 or the end-of-text token repeated.
+            # We find the first occurrence of the end-of-text token or look for the padding.
+
+            # For robust counting across models:
+            # 1. Start with the full length
+            # 2. Subtract 2 (for start and end tokens)
+            # 3. If the length is still suspiciously large (like 510 or 254),
+            #    it's likely a padded tokenizer. We try to find the actual content.
+
+            raw_len = len(token_list)
+            content_len = raw_len - 2
+
+            # If it looks like a fixed-length padded result (common for T5/Qwen in ComfyUI)
+            if raw_len >= 77:
+                # Find the actual used length.
+                # Most tokenizers pad with 0 or the last token (EOS).
+                if isinstance(token_list, torch.Tensor):
+                    ids = token_list.tolist()
+                else:
+                    ids = token_list
+
+                # Qwen/Llama usually have a start token at 0.
+                # Let's count how many IDs are actually distinct from the last token in the list
+                # (which is usually the padding token)
+                pad_id = ids[-1]
+                actual_count = 0
+                for i in range(1, len(ids) - 1): # Skip start token at 0 and end token
+                    if ids[i] != pad_id:
+                        actual_count += 1
+                    else:
+                        break # Hit padding
+                content_len = actual_count
+
+            if content_len > max_content_len:
+                max_content_len = content_len
+
+    return max(0, max_content_len)
+
+
 class AspectRatio(str, Enum):
     SQUARE = "1:1 (Square)"
     PHOTO_H = "3:2 (Photo)"
@@ -2235,13 +2291,13 @@ def encode_embedding_scaled_bias(clip, text, llama_template=None, **kwargs):
         match = bias_pattern.fullmatch(segment)
         if match:
             # Count before adding biased segment
-            start_count = get_token_count(clip, clean_text, llama_template=prefix_template)
+            start_count = get_token_count_scaled(clip, clean_text, llama_template=prefix_template)
 
             bias_text, strength_str = match.groups()
             clean_text += bias_text
 
             # Count after adding biased segment
-            end_count = get_token_count(clip, clean_text, llama_template=prefix_template)
+            end_count = get_token_count_scaled(clip, clean_text, llama_template=prefix_template)
 
             if end_count > start_count:
                 # BOS is at index 0, so tokens are at indices 1 to count
@@ -3158,14 +3214,14 @@ class SU_InjectNoiseToLatent(io.ComfyNode):
 
 class FrakturPadNode(io.ComfyNode):
     """
-    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    ComfyUI node that edit text to some systems by converting text to bold fraktur with word joiner padding.
     """
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="Frakturpad",
-            display_name="Frakturpad (Text Obfuscation)",
+            display_name="Frakturpad",
             category="advanced/text",
             inputs=[
                 io.String.Input(
@@ -3191,7 +3247,7 @@ class FrakturPadNode(io.ComfyNode):
 
 class UnFrakturPadNode(io.ComfyNode):
     """
-    ComfyUI node that deobfuscates text by converting bold fraktur back to ASCII
+    ComfyUI node that reverts text by converting bold fraktur back to ASCII
     and removing word joiner padding. This is the inverse of FrakturPadNode.
     """
 
@@ -3199,14 +3255,14 @@ class UnFrakturPadNode(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="UnFrakturPad",
-            display_name="UnFrakturPad (Text Deobfuscation)",
+            display_name="UnFrakturPad",
             category="advanced/text",
             inputs=[
                 io.String.Input(
                     "text",
                     multiline=True,
                     default="",
-                    placeholder="Enter obfuscated text to convert back...",
+                    placeholder="Enter editd text to convert back...",
                 ),
             ],
             outputs=[
@@ -3258,14 +3314,14 @@ class JoinerPadding(io.ComfyNode):
 
 class IdeographicTagPad(io.ComfyNode):
     """
-    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    ComfyUI node that edit text to some systems by converting text to bold fraktur with word joiner padding.
     """
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="IdeographicTagPad",
-            display_name="IdeographicTagPad (Text Obfuscation)",
+            display_name="IdeographicTagPad",
             category="advanced/text",
             inputs=[
                 io.String.Input(
@@ -3291,14 +3347,14 @@ class IdeographicTagPad(io.ComfyNode):
 
 class IdeographicLinePad(io.ComfyNode):
     """
-    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    ComfyUI node that edit text to some systems by converting text to bold fraktur with word joiner padding.
     """
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="IdeographicLinePad",
-            display_name="IdeographicLinePad (Text Obfuscation)",
+            display_name="IdeographicLinePad",
             category="advanced/text",
             inputs=[
                 io.String.Input(
@@ -3324,14 +3380,14 @@ class IdeographicLinePad(io.ComfyNode):
 
 class IdeographicSentencePad(io.ComfyNode):
     """
-    ComfyUI node that obfuscate text to some systems by converting text to bold fraktur with word joiner padding.
+    ComfyUI node that edit text to some systems by converting text to bold fraktur with word joiner padding.
     """
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="IdeographicSentencePad",
-            display_name="IdeographicSentencePad (Text Obfuscation)",
+            display_name="IdeographicSentencePad",
             category="advanced/text",
             inputs=[
                 io.String.Input(

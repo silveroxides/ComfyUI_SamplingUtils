@@ -1,6 +1,6 @@
 # ComfyUI_SamplingUtils
 
-A collection of utility nodes for ComfyUI providing sampling parameter management, text encoding with system prompts, mask manipulation, image blending, text obfuscation, and more.
+A collection of utility nodes for ComfyUI providing sampling parameter management, text encoding with system prompts, mask manipulation, image blending, text edit, and more.
 
 ## Installation
 
@@ -132,14 +132,14 @@ Load images from arbitrary file system paths with proper mask handling.
 
 ---
 
-### Text Obfuscation
+### Text  Edit
 
-#### Frakturpad (Text Obfuscation)
+#### Frakturpad
 **Category:** `text`
 
-Obfuscates text by converting ASCII letters to Unicode bold fraktur characters (𝕬𝖇𝖈...) and padding with word joiner characters (U+2060). Useful for bypassing text filters while maintaining readability.
+Edits text by converting ASCII letters to Unicode bold fraktur characters (𝕬𝖇𝖈...) and padding with word joiner characters (U+2060). Useful for bypassing text filters while maintaining readability.
 
-#### UnFrakturPad (Text Deobfuscation)
+#### UnFrakturPad
 **Category:** `text`
 
 Reverses the frakturpad operation - removes word joiners and converts bold fraktur back to ASCII.
