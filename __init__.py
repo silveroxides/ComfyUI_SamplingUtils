@@ -986,24 +986,32 @@ def get_token_count_scaled(clip, text, **kwargs):
 
 class AspectRatio(str, Enum):
     SQUARE = "1:1 (Square)"
-    PHOTO_H = "3:2 (Photo)"
-    STANDARD_H = "4:3 (Standard)"
+    PHOTO_H = "3:2 (Photo Format)"
+    STANDARD_H = "4:3 (Standard Format)"
+    CANVAS_H = "5:4 (Canvas Format)"
     WIDESCREEN_H = "16:9 (Widescreen)"
     ULTRAWIDE_H = "21:9 (Ultrawide)"
-    PHOTO_V = "2:3 (Portrait Photo)"
-    STANDARD_V = "3:4 (Portrait Standard)"
-    WIDESCREEN_V = "9:16 (Portrait Widescreen)"
+    PANORAMA_H = "3:1 (Panorama)"
+    PHOTO_V = "2:3 (Medium Portrait)"
+    STANDARD_V = "3:4 (Standard Portrait)"
+    CANVAS_V = "4:5 (Canvas Portrait)"
+    WIDESCREEN_V = "9:16 (Tall Portrait)"
+    PANORAMA_V = "1:3 (Tall Panorama)"
 
 
 ASPECT_RATIOS: dict[AspectRatio, tuple[int, int]] = {
     AspectRatio.SQUARE: (1, 1),
     AspectRatio.PHOTO_H: (3, 2),
     AspectRatio.STANDARD_H: (4, 3),
+    AspectRatio.CANVAS_H: (5, 4),
     AspectRatio.WIDESCREEN_H: (16, 9),
     AspectRatio.ULTRAWIDE_H: (21, 9),
+    AspectRatio.PANORAMA_H: (3, 1),
     AspectRatio.PHOTO_V: (2, 3),
     AspectRatio.STANDARD_V: (3, 4),
+    AspectRatio.CANVAS_V: (4, 5),
     AspectRatio.WIDESCREEN_V: (9, 16),
+    AspectRatio.PANORAMA_V: (1, 3),
 }
 
 
@@ -1201,6 +1209,61 @@ class AdjustedResolutionParameters(io.ComfyNode):
             upscaled_height,
             batch_size,
         )
+
+
+class ResolutionSelectorExtended(io.ComfyNode):
+    """Calculate width and height from aspect ratio and megapixel target."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ResolutionSelectorExtended",
+            display_name="Resolution Selector Extended",
+            category="utilities",
+            description="Calculate width and height from aspect ratio and megapixel target. Useful for setting up Empty Latent Image dimensions.",
+            inputs=[
+                io.Combo.Input(
+                    "aspect_ratio",
+                    options=AspectRatio,
+                    default=AspectRatio.SQUARE,
+                    tooltip="The aspect ratio for the output dimensions.",
+                ),
+                io.Float.Input(
+                    "megapixels",
+                    default=1.0,
+                    min=0.1,
+                    max=16.0,
+                    step=0.1,
+                    tooltip="Target total megapixels. 1.0 MP ≈ 1024×1024 for square.",
+                ),
+                io.Int.Input(
+                    id="multiple",
+                    default=8,
+                    min=8,
+                    max=128,
+                    step=4,
+                    tooltip="Nearest multiple of the result to set the selected resolution to.",
+                ),
+            ],
+            outputs=[
+                io.Int.Output(
+                    "width", tooltip="Calculated width in pixels (multiple of selected multiple)."
+                ),
+                io.Int.Output(
+                    "height", tooltip="Calculated height in pixels (multiple of selected multiple)."
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int) -> io.NodeOutput:
+        w_ratio, h_ratio = ASPECT_RATIOS[aspect_ratio]
+        total_pixels = megapixels * 1024 * 1024
+        scale = math.sqrt(total_pixels / (w_ratio * h_ratio))
+        width = round(w_ratio * scale / multiple) * multiple
+        height = round(h_ratio * scale / multiple) * multiple
+        return io.NodeOutput(width, height)
+
 
 class ImageScaleAndResolutionPicker(io.ComfyNode):
     upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
@@ -4776,6 +4839,7 @@ class SamplingUtils(ComfyExtension):
             LlamaTokenizerOptions,
             SamplingParameters,
             AdjustedResolutionParameters,
+            ResolutionSelectorExtended,
             ImageScaleAndResolutionPicker,
             GetJsonKeyValue,
             Image_Color_Noise,
