@@ -1244,6 +1244,14 @@ class ResolutionSelectorExtended(io.ComfyNode):
                     step=4,
                     tooltip="Nearest multiple of the result to set the selected resolution to.",
                 ),
+                io.Int.Input(
+                    id="minimum",
+                    default=256,
+                    min=32,
+                    max=4096,
+                    step=32,
+                    tooltip="Set minimum resolution for any side to be used",
+                ),
             ],
             outputs=[
                 io.Int.Output(
@@ -1256,7 +1264,7 @@ class ResolutionSelectorExtended(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int) -> io.NodeOutput:
+    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int, minimum: int) -> io.NodeOutput:
         w_ratio, h_ratio = ASPECT_RATIOS[aspect_ratio]
         total_pixels = megapixels * 1024 * 1024
         scale = math.sqrt(total_pixels / (w_ratio * h_ratio))
