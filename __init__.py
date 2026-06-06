@@ -1255,10 +1255,10 @@ class ResolutionSelectorExtended(io.ComfyNode):
             ],
             outputs=[
                 io.Int.Output(
-                    "width", tooltip="Calculated width in pixels (multiple of selected multiple)."
+                    "width", tooltip="Calculated width in pixels multiplied by the selected multiple."
                 ),
                 io.Int.Output(
-                    "height", tooltip="Calculated height in pixels (multiple of selected multiple)."
+                    "height", tooltip="Calculated height in pixels multiplied by the selected multiple."
                 ),
             ],
         )
@@ -1270,6 +1270,14 @@ class ResolutionSelectorExtended(io.ComfyNode):
         scale = math.sqrt(total_pixels / (w_ratio * h_ratio))
         width = round(w_ratio * scale / multiple) * multiple
         height = round(h_ratio * scale / multiple) * multiple
+        if width < minimum or height < minimum:
+            step_w = multiple // math.gcd(w_ratio, multiple)
+            step_h = multiple // math.gcd(h_ratio, multiple)
+            k_step = step_w * step_h // math.gcd(step_w, step_h)
+            min_k = math.ceil(max(minimum / w_ratio, minimum / h_ratio))
+            k = math.ceil(min_k / k_step) * k_step
+            width = w_ratio * k
+            height = h_ratio * k
         return io.NodeOutput(width, height)
 
 
