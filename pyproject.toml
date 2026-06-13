@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI_SamplingUtils"
-description = "Utilities making it easy to set up inference parameters."
-version = "0.5.6"
+description = "DEPRECATED. Install ComfyUI-UtilsCollection instead from https://github.com/silveroxides/ComfyUI-UtilsCollection"
+version = "0.5.7"
 license = { file = "LICENSE" }
 classifiers = [
     "Operating System :: OS Independent",
