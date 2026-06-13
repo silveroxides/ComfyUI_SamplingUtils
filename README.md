@@ -1,8 +1,16 @@
-# ComfyUI_SamplingUtils
+# DEPRECATED
+
+## Install [ComfyUI-UtilsCollection](https://github.com/silveroxides/ComfyUI-UtilsCollection) instead.
+
+
+=========================================
+
+
+### ComfyUI_SamplingUtils
 
 A collection of utility nodes for ComfyUI providing sampling parameter management, text encoding with system prompts, mask manipulation, image blending, text edit, and more.
 
-## Installation
+### Installation
 
 Place this folder in your `ComfyUI/custom_nodes/` directory.
 
@@ -12,7 +20,7 @@ Place this folder in your `ComfyUI/custom_nodes/` directory.
 - `kornia` - For morphological mask operations
 - `scipy` - For mask hole filling
 
-## Nodes
+### Nodes
 
 ### Sampling & Parameters
 
