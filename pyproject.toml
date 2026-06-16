@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI_SamplingUtils"
 description = "DEPRECATED. Install ComfyUI-UtilsCollection instead from https://github.com/silveroxides/ComfyUI-UtilsCollection"
-version = "0.5.10"
+version = "0.5.11"
 license = { file = "LICENSE" }
 classifiers = [
     "Operating System :: OS Independent",
